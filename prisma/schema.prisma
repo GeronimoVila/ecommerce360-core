@@ -1,0 +1,42 @@
+// /ecommerce360-core/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// --------------------------------------------------
+// NÚCLEO E-COMMERCE Y CRM (SSOT)
+// --------------------------------------------------
+
+model User {
+  id             String   @id @default(uuid()) @db.Uuid
+  role           String   @default("CUSTOMER") // Roles: ADMIN, SELLER, CUSTOMER
+  email          String   @unique
+  passwordHash   String
+  refCode        String?  @unique // Link único de afiliado (Ej: ?ref=GERO2026)
+  boundSellerId  String?  @db.Uuid // Customer Binding: ID del vendedor que lo captó
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("users")
+}
+
+model Product {
+  id             String   @id @default(uuid()) @db.Uuid
+  sku            String   @unique
+  name           String
+  basePrice      Decimal  @db.Decimal(10, 2)
+  physicalStock  Int      @default(0) // Control estricto de concurrencia
+  isCombo        Boolean  @default(false)
+  commissionRate Decimal  @db.Decimal(5, 2) // % de comisión por defecto
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("products")
+}
