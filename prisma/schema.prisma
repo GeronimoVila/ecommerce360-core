@@ -1,42 +1,170 @@
-// /ecommerce360-core/prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
-// --------------------------------------------------
-// NÚCLEO E-COMMERCE Y CRM (SSOT)
-// --------------------------------------------------
+enum Role {
+  ADMIN
+  SELLER
+  CUSTOMER
+  LOGISTICS
+}
+
+enum OrderStatus {
+  PENDING
+  BUDGET
+  PAID
+  SHIPPED
+  DELIVERED
+}
+
+enum PaymentMethod {
+  MP
+  MOBBEX
+  TRANSFERENCIA
+}
+
+enum CommissionStatus {
+  PENDING_CLEARANCE
+  AVAILABLE
+  LIQUIDATED
+  CANCELED
+}
+
 
 model User {
-  id             String   @id @default(uuid()) @db.Uuid
-  role           String   @default("CUSTOMER") // Roles: ADMIN, SELLER, CUSTOMER
-  email          String   @unique
-  passwordHash   String
-  refCode        String?  @unique // Link único de afiliado (Ej: ?ref=GERO2026)
-  boundSellerId  String?  @db.Uuid // Customer Binding: ID del vendedor que lo captó
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id            String   @id @default(uuid()) @db.Uuid
+  role          Role     @default(CUSTOMER)
+  email         String   @unique
+  password_hash String
+  is_active     Boolean  @default(true)
+
+  customer_profile CustomerProfile?
+  seller_profile   SellerProfile?
+
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
 
   @@map("users")
 }
 
+model CustomerProfile {
+  id              String  @id @default(uuid()) @db.Uuid
+  user_id         String  @unique @db.Uuid
+  first_name      String?
+  last_name       String?
+  phone           String?
+  
+  user            User           @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  orders          Order[]        @relation("CustomerOrders")
+
+  @@map("customer_profiles")
+}
+
+model SellerProfile {
+  id              String  @id @default(uuid()) @db.Uuid
+  user_id         String  @unique @db.Uuid
+  ref_code        String  @unique
+  first_name      String
+  last_name       String
+  cbu_alias       String?
+  
+  user            User               @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  assisted_orders Order[]            @relation("SellerAssistedOrders")
+  commissions     CommissionLedger[] @relation("SellerCommissions")
+
+  @@map("seller_profiles")
+}
+
 model Product {
-  id             String   @id @default(uuid()) @db.Uuid
-  sku            String   @unique
-  name           String
-  basePrice      Decimal  @db.Decimal(10, 2)
-  physicalStock  Int      @default(0) // Control estricto de concurrencia
-  isCombo        Boolean  @default(false)
-  commissionRate Decimal  @db.Decimal(5, 2) // % de comisión por defecto
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id              String      @id @default(uuid()) @db.Uuid
+  sku             String      @unique
+  name            String
+  base_price      Decimal     @db.Decimal(10, 2)
+  physical_stock  Int         @default(0)
+  is_combo        Boolean     @default(false)
+  commission_rate Decimal     @db.Decimal(5, 2)
+  
+  combos_where_part ComboItem[] @relation("ComboPart")
+  combo_parts       ComboItem[] @relation("ComboParent")
+  order_items       OrderItem[]
+
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
 
   @@map("products")
+}
+
+model ComboItem {
+  combo_id   String @db.Uuid
+  product_id String @db.Uuid
+  quantity   Int
+
+  combo   Product @relation("ComboParent", fields: [combo_id], references: [id], onDelete: Cascade)
+  product Product @relation("ComboPart", fields: [product_id], references: [id], onDelete: Cascade)
+
+  @@id([combo_id, product_id])
+  @@map("combo_items")
+}
+
+model Order {
+  id              String        @id @default(uuid()) @db.Uuid
+  customer_id     String?       @db.Uuid
+  seller_id       String?       @db.Uuid
+  status          OrderStatus   @default(PENDING)
+  total_amount    Decimal       @db.Decimal(10, 2)
+  coupon_code     String?
+  discount_amount Decimal       @default(0) @db.Decimal(10, 2)
+  payment_method  PaymentMethod
+  
+  gateway_txn_id  String?       @unique 
+  gateway_metadata Json?
+  
+  shipping_cp     String?
+  shipping_address Json?
+  
+  customer        CustomerProfile? @relation("CustomerOrders", fields: [customer_id], references: [id], onDelete: SetNull)
+  seller          SellerProfile?   @relation("SellerAssistedOrders", fields: [seller_id], references: [id], onDelete: SetNull)
+  items           OrderItem[]
+  commissions     CommissionLedger[]
+
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @updatedAt
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id         String   @id @default(uuid()) @db.Uuid
+  order_id   String   @db.Uuid
+  product_id String?  @db.Uuid
+  quantity   Int
+  
+  unit_price Decimal  @db.Decimal(10, 2) 
+  
+  order      Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product    Product? @relation(fields: [product_id], references: [id], onDelete: SetNull)
+
+  @@map("order_items")
+}
+
+model CommissionLedger {
+  id            String           @id @default(uuid()) @db.Uuid
+  order_id      String           @db.Uuid
+  seller_id     String           @db.Uuid
+  amount        Decimal          @db.Decimal(10, 2)
+  status        CommissionStatus @default(PENDING_CLEARANCE)
+  clearing_date DateTime?
+  
+  order         Order            @relation(fields: [order_id], references: [id])
+  seller        SellerProfile    @relation("SellerCommissions", fields: [seller_id], references: [id])
+
+  created_at    DateTime         @default(now())
+  updated_at    DateTime         @updatedAt
+
+  @@map("commission_ledger")
 }

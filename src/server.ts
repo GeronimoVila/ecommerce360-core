@@ -6,18 +6,16 @@ import cors from 'cors';
 const prisma = new PrismaClient();
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 
-// 1. Estrategia de Resiliencia (Fault Tolerance) para la Caché
 const redis = new Redis(redisUrl, {
     retryStrategy(times) {
         if (times > 2) {
-            return null; // Aborta reintentos tras 2 fallos para evitar el bucle ECONNREFUSED
+            return null;
         }
-        return Math.min(times * 100, 2000); // Backoff exponencial
+        return Math.min(times * 100, 2000);
     },
     maxRetriesPerRequest: 1
 });
 
-// Interceptor para silenciar el spam de errores de red en el entorno local
 redis.on('error', (err: any) => {
     if (err.code !== 'ECONNREFUSED') {
         console.error("Redis Error:", err);
@@ -51,8 +49,6 @@ async function bootstrap() {
         await prisma.$connect();
         console.log("✅ Conexión exitosa al SSOT (Neon Tech - PostgreSQL).");
 
-        // 2. Aislamiento del Cuello de Botella
-        // Evita que la falta de Redis local detenga el arranque del servidor transaccional
         try {
             const ping = await redis.ping();
             if (ping === 'PONG') {
