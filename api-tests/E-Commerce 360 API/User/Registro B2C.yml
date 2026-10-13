@@ -1,0 +1,23 @@
+info:
+  name: Registro B2C
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/auth/register"
+  body:
+    type: json
+    data: |-
+      {
+        "email": "cliente@test.com",
+        "password": "123",
+        "first_name": "Ana",
+        "last_name": "Gil"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
