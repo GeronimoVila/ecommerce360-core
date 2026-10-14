@@ -15,5 +15,16 @@ export const RedisService = {
   async isTokenBanned(jti: string): Promise<boolean> {
     const result = await redisClient.get(`banned_jwt:${jti}`);
     return result !== null;
+  },
+
+  async banUserId(userId: string, ttlSeconds: number): Promise<void> {
+    if (ttlSeconds > 0) {
+      await redisClient.setex(`banned_user:${userId}`, ttlSeconds, 'true');
+    }
+  },
+
+  async isUserBanned(userId: string): Promise<boolean> {
+    const result = await redisClient.get(`banned_user:${userId}`);
+    return result !== null;
   }
 };

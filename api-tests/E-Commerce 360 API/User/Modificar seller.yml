@@ -1,0 +1,20 @@
+info:
+  name: Modificar seller
+  type: http
+
+http:
+  method: PATCH
+  url: "{{base_url}}/api/v1/users/1a4e8098-ab29-4535-bc36-b86fea3b0aa8"
+  body:
+    type: json
+    data: |-
+      {
+        "cbu_alias": "luis1.mp"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

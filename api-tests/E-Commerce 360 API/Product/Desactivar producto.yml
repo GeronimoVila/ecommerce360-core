@@ -1,0 +1,15 @@
+info:
+  name: Desactivar producto
+  type: http
+  seq: 1
+
+http:
+  method: DELETE
+  url: "{{base_url}}/api/v1/products/9861d6c5-06d7-442f-886f-b48d1829baa0"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

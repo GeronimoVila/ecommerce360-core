@@ -15,9 +15,16 @@ export const requireAuth = (allowedRoles: string[]) => {
 
       const payload = jwt.verify(token, process.env.JWT_SECRET!) as any;
 
-      const isBanned = await RedisService.isTokenBanned(payload.jti);
-      if (isBanned) {
+
+      const isTokenBanned = await RedisService.isTokenBanned(payload.jti);
+      if (isTokenBanned) {
         res.status(401).json({ error: 'Sesión revocada. Vuelva a iniciar sesión.' });
+        return;
+      }
+
+      const isUserBanned = await RedisService.isUserBanned(payload.sub);
+      if (isUserBanned) {
+        res.status(403).json({ error: 'Tu cuenta ha sido suspendida o revocada administrativamente.' });
         return;
       }
 

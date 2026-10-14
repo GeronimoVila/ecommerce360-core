@@ -1,0 +1,20 @@
+info:
+  name: Modificar producto
+  type: http
+
+http:
+  method: PATCH
+  url: "{{base_url}}/api/v1/products/9861d6c5-06d7-442f-886f-b48d1829baa0"
+  body:
+    type: json
+    data: |-
+      {
+        "purchase_cost": 900000
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

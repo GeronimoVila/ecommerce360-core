@@ -1,10 +1,18 @@
 info:
   name: Perfil (Admin)
   type: http
+  seq: 1
 
 http:
   method: GET
   url: "{{base_url}}/api/v1/users/me"
+  headers:
+    - name: Cookie
+      value: access_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjM2ViZTZiNC03MDE4LTQ4NWYtYmFlNC05ZWI1OTZiZTczOWUiLCJlbWFpbCI6InZlbmRlZG9yMkB0ZXN0LmNvbSIsInJvbGUiOiJTRUxMRVIiLCJqdGkiOiJjMGFjNDkwOS03ZGNhLTQxNDYtOTFjNy1mYzUyMWVkYWJiZWMiLCJpYXQiOjE3OTE5ODcwMjQsImV4cCI6MTc5MTk4NzkyNH0.e_H6Bs2lXJ6S93NalRix4_XS-j5Aq1k37rEqiOb4zDI
+  params:
+    - name: ""
+      value: ""
+      type: query
   auth: inherit
 
 settings:

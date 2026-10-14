@@ -1,0 +1,14 @@
+info:
+  name: Ver producto
+  type: http
+
+http:
+  method: GET
+  url: "{{base_url}}/api/v1/products/ece8c691-6f91-4c94-a6d6-53368ea6b798"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

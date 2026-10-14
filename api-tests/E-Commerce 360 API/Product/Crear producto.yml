@@ -1,0 +1,26 @@
+info:
+  name: Crear producto
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/products"
+  body:
+    type: json
+    data: |-
+      {
+        "sku": "IPH-15-PRO-128",
+        "name": "iPhone 15 Pro 128GB",
+        "purchase_cost": 800000,
+        "vat_rate": 21,
+        "profit_margin": 30,
+        "physical_stock": 50,
+        "commission_rate": 5.0
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

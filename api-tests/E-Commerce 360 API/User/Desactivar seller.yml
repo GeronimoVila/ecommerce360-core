@@ -1,0 +1,15 @@
+info:
+  name: Desactivar seller
+  type: http
+  seq: 1
+
+http:
+  method: DELETE
+  url: "{{base_url}}/api/v1/users/c3ebe6b4-7018-485f-bae4-9eb596be739e"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
