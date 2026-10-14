@@ -5,7 +5,8 @@ import {
   deactivateProduct,
   getProducts,
   getProductById,
-  reactivateProduct 
+  reactivateProduct,
+  createCombo
 } from './products.controller';
 import { requireAuth } from '../common/guards/auth.guard';
 
@@ -20,5 +21,6 @@ router.post('/', requireAuth(['ADMIN']), createProduct);
 router.patch('/:id', requireAuth(['ADMIN']), updateProduct);
 router.delete('/:id', requireAuth(['ADMIN']), deactivateProduct);
 router.patch('/:id/restore', requireAuth(['ADMIN']), reactivateProduct);
+router.post('/combos', requireAuth(['ADMIN']), createCombo);
 
 export default router;

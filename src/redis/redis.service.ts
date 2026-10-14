@@ -26,5 +26,41 @@ export const RedisService = {
   async isUserBanned(userId: string): Promise<boolean> {
     const result = await redisClient.get(`banned_user:${userId}`);
     return result !== null;
+  },
+
+  async setComboStock(comboId: string, stock: number): Promise<void> {
+    await redisClient.setex(`combo:stock:${comboId}`, 86400, stock.toString());
+  },
+
+  async getComboStock(comboId: string): Promise<number | null> {
+    const stock = await redisClient.get(`combo:stock:${comboId}`);
+    return stock !== null ? parseInt(stock, 10) : null;
+  },
+
+  async registerComboDependencies(comboId: string, partIds: string[]): Promise<void> {
+    const pipeline = redisClient.pipeline();
+    for (const partId of partIds) {
+      pipeline.sadd(`part:combos:${partId}`, comboId);
+    }
+    await pipeline.exec();
+  },
+
+  async getCombosByPart(partId: string): Promise<string[]> {
+    return await redisClient.smembers(`part:combos:${partId}`);
+  },
+
+  async getMultipleComboStocks(comboIds: string[]): Promise<Record<string, number>> {
+    if (comboIds.length === 0) return {};
+    
+    const keys = comboIds.map(id => `combo:stock:${id}`);
+    const values = await redisClient.mget(keys);
+    
+    const result: Record<string, number> = {};
+    comboIds.forEach((id, index) => {
+      const val = values[index];
+      result[id] = val !== null ? parseInt(val, 10) : 0;
+    });
+    
+    return result;
   }
 };

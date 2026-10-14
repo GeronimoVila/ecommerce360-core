@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import prisma from '../config/prisma';
 import { Prisma } from '@prisma/client';
+import { RedisService } from '../redis/redis.service';
 
 export const createProduct = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -134,10 +135,24 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
       }
     });
 
+    const comboIds = products.filter(p => p.is_combo).map(p => p.id);
+    
+    const comboStocks = await RedisService.getMultipleComboStocks(comboIds);
+
+    const hydratedProducts = products.map(product => {
+      if (product.is_combo) {
+        return {
+          ...product,
+          physical_stock: comboStocks[product.id] ?? 0
+        };
+      }
+      return product;
+    });
+
     const total = await prisma.product.count({ where: { is_active: true } });
 
     res.status(200).json({
-      data: products,
+      data: hydratedProducts,
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) }
     });
   } catch (error) {
@@ -166,6 +181,11 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
       return;
     }
 
+    if (product.is_combo) {
+      const virtualStock = await RedisService.getComboStock(product.id);
+      product.physical_stock = virtualStock ?? 0;
+    }
+
     res.status(200).json(product);
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener el producto' });
@@ -191,5 +211,125 @@ export const reactivateProduct = async (req: Request, res: Response): Promise<vo
       return;
     }
     res.status(500).json({ error: 'Error al reactivar el producto' });
+  }
+};
+
+export const createCombo = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { 
+      sku, 
+      name, 
+      base_price, 
+      commission_rate, 
+      parts 
+    } = req.body;
+
+    if (!parts || !Array.isArray(parts) || parts.length === 0) {
+      res.status(400).json({ error: 'Un combo debe contener al menos un componente.' });
+      return;
+    }
+
+    const partSkus = parts.map((p: { sku: string; quantity: number }) => p.sku);
+
+    const dbParts = await prisma.product.findMany({
+      where: { 
+        sku: { in: partSkus },
+        is_active: true
+      }
+    });
+
+    if (dbParts.length !== parts.length) {
+      res.status(404).json({ error: 'Uno o más componentes del combo no existen o están inactivos.' });
+      return;
+    }
+
+    const hasSubCombo = dbParts.some(part => part.is_combo);
+    if (hasSubCombo) {
+      res.status(400).json({ error: 'Regla de negocio violada: No se permite incluir un combo dentro de otro combo.' });
+      return;
+    }
+
+    let minVirtualStock = Infinity;
+    const comboItemsToInsert: { product_id: string; quantity: number }[] = [];
+    const partIdsToRegister: string[] = [];
+
+    for (const item of parts) {
+      const dbPart = dbParts.find(p => p.sku === item.sku)!;
+      const requiredQty = parseInt(item.quantity, 10);
+
+      if (isNaN(requiredQty) || requiredQty <= 0) {
+        res.status(400).json({ error: `La cantidad para el componente ${item.sku} debe ser un entero positivo.` });
+        return;
+      }
+
+      const availableCombosFromPart = Math.floor(dbPart.physical_stock / requiredQty);
+      if (availableCombosFromPart < minVirtualStock) {
+        minVirtualStock = availableCombosFromPart;
+      }
+
+      comboItemsToInsert.push({
+        product_id: dbPart.id,
+        quantity: requiredQty
+      });
+
+      partIdsToRegister.push(dbPart.id);
+    }
+
+    const calculatedInitialStock = minVirtualStock === Infinity ? 0 : minVirtualStock;
+
+    const newCombo = await prisma.$transaction(async (tx) => {
+      return await tx.product.create({
+        data: {
+          sku: sku.toUpperCase(),
+          name,
+          base_price: new Prisma.Decimal(base_price),
+          purchase_cost: new Prisma.Decimal(0),
+          vat_rate: new Prisma.Decimal(0),
+          profit_margin: new Prisma.Decimal(0),
+          physical_stock: 0,
+          is_combo: true,
+          commission_rate: new Prisma.Decimal(commission_rate),
+          combo_parts: {
+            create: comboItemsToInsert
+          }
+        },
+        include: {
+          combo_parts: {
+            include: {
+              product: {
+                select: { sku: true, name: true, physical_stock: true }
+              }
+            }
+          }
+        }
+      });
+    });
+
+    await RedisService.setComboStock(newCombo.id, calculatedInitialStock);
+    await RedisService.registerComboDependencies(newCombo.id, partIdsToRegister);
+
+    res.status(201).json({
+      message: 'Combo creado exitosamente y sincronizado con Redis',
+      combo: {
+        id: newCombo.id,
+        sku: newCombo.sku,
+        name: newCombo.name,
+        base_price: newCombo.base_price,
+        virtual_stock: calculatedInitialStock,
+        parts: newCombo.combo_parts.map(cp => ({
+          sku: cp.product.sku,
+          name: cp.product.name,
+          quantity_required: cp.quantity,
+          current_physical_stock: cp.product.physical_stock
+        }))
+      }
+    });
+
+  } catch (error: any) {
+    if (error.code === 'P2002') {
+      res.status(409).json({ error: 'El SKU ingresado para el combo ya existe en el catálogo.' });
+      return;
+    }
+    res.status(500).json({ error: 'Error interno al crear el combo' });
   }
 };

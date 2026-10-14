@@ -1,15 +1,16 @@
 info:
   name: Modificar producto
   type: http
+  seq: 1
 
 http:
   method: PATCH
-  url: "{{base_url}}/api/v1/products/9861d6c5-06d7-442f-886f-b48d1829baa0"
+  url: "{{base_url}}/api/v1/products/ece8c691-6f91-4c94-a6d6-53368ea6b798"
   body:
     type: json
     data: |-
       {
-        "purchase_cost": 900000
+        "physical_stock": 5
       }
   auth: inherit
 

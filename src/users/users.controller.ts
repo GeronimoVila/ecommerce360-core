@@ -58,7 +58,6 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
   try {
     const targetUser = await prisma.user.findUnique({ 
       where: { id: targetId },
-      // CORRECCIÓN: Usamos snake_case tal como está en tu schema.prisma
       include: { customer_profile: true, seller_profile: true } 
     });
 
@@ -77,7 +76,6 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
         await tx.user.update({ where: { id: targetId }, data: { email } });
       }
 
-      // CORRECCIÓN: Acceso y actualización usando snake_case
       if (targetUser.role === 'SELLER' && targetUser.seller_profile) {
         await tx.sellerProfile.update({
           where: { id: targetUser.seller_profile.id },
@@ -102,7 +100,6 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
 };
 
 export const deactivateUser = async (req: Request, res: Response): Promise<void> => {
-  // CORRECCIÓN 4: Casting explícito a string
   const targetId = req.params.id as string;
 
   try {
@@ -123,7 +120,6 @@ export const deactivateUser = async (req: Request, res: Response): Promise<void>
       data: { is_active: false }
     });
 
-    // CORRECCIÓN 5: targetId ya es de tipo 'string' puro, RedisService no fallará
     await RedisService.banUserId(targetId, 900);
 
     res.status(200).json({ message: `Cuenta de ${targetUser.role} suspendida correctamente.` });

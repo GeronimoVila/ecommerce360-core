@@ -1,0 +1,27 @@
+info:
+  name: Crear combo
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/products/combos"
+  body:
+    type: json
+    data: |-
+      {
+        "sku": "KIT-TECNOLOGICO-PRO",
+        "name": "Kit de Tecnológico",
+        "base_price": 150000.00,
+        "commission_rate": 7.5,
+        "parts": [
+          { "sku": "IPH-15-PRO-128", "quantity": 2 },
+          { "sku": "IPH-16-PRO-256", "quantity": 1 }
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

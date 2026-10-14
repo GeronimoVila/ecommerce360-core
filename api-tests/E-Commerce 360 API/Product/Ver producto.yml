@@ -1,10 +1,11 @@
 info:
   name: Ver producto
   type: http
+  seq: 1
 
 http:
   method: GET
-  url: "{{base_url}}/api/v1/products/ece8c691-6f91-4c94-a6d6-53368ea6b798"
+  url: "{{base_url}}/api/v1/products/70cbc139-374c-4861-8407-95c58d9a82df"
   auth: inherit
 
 settings:
