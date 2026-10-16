@@ -92,6 +92,9 @@ model Product {
   is_combo        Boolean     @default(false)
   commission_rate Decimal     @db.Decimal(5, 2)
   is_active       Boolean     @default(true)
+  category_id     String?     @db.Uuid
+  category        Category?   @relation(fields: [category_id], references: [id], onDelete: SetNull)
+  payment_rules   PaymentRule[]
   combos_where_part ComboItem[] @relation("ComboPart")
   combo_parts       ComboItem[] @relation("ComboParent")
   order_items       OrderItem[]
@@ -148,6 +151,7 @@ model OrderItem {
   quantity   Int
   
   unit_price Decimal  @db.Decimal(10, 2) 
+  pure_base_price Decimal  @db.Decimal(10, 2)
   
   order      Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
   product    Product? @relation(fields: [product_id], references: [id], onDelete: SetNull)
@@ -170,4 +174,42 @@ model CommissionLedger {
   updated_at    DateTime         @updatedAt
 
   @@map("commission_ledger")
+}
+
+model Category {
+  id            String        @id @default(uuid()) @db.Uuid
+  name          String
+  slug          String        @unique
+  is_active     Boolean       @default(true)
+
+  products      Product[]
+  payment_rules PaymentRule[]
+
+  created_at    DateTime      @default(now())
+  updated_at    DateTime      @updatedAt
+
+  @@map("categories")
+}
+
+model PaymentRule {
+  id              String        @id @default(uuid()) @db.Uuid
+  payment_method  PaymentMethod
+  installments    Int           @default(1)
+  coefficient     Decimal       @db.Decimal(5, 4)
+  is_active       Boolean       @default(true)
+
+  is_global       Boolean       @default(false)
+  category_id     String?       @db.Uuid
+  product_id      String?       @db.Uuid
+
+  category        Category?     @relation(fields: [category_id], references: [id], onDelete: Cascade)
+  product         Product?      @relation(fields: [product_id], references: [id], onDelete: Cascade)
+
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @updatedAt
+
+  @@unique([payment_method, installments, product_id])
+  @@unique([payment_method, installments, category_id])
+  
+  @@map("payment_rules")
 }

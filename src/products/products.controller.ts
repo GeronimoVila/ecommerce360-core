@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import prisma from '../config/prisma';
 import { Prisma } from '@prisma/client';
 import { RedisService } from '../redis/redis.service';
+import { PricingEngine } from './pricing.engine';
 
 export const createProduct = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -131,12 +132,13 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
         name: true,
         base_price: true,
         physical_stock: true,
-        is_combo: true
+        is_combo: true,
+        category_id: true
       }
     });
 
     const comboIds = products.filter(p => p.is_combo).map(p => p.id);
-    
+
     const comboStocks = await RedisService.getMultipleComboStocks(comboIds);
 
     const hydratedProducts = products.map(product => {
@@ -149,13 +151,18 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
       return product;
     });
 
+    const activeRules = await RedisService.getActivePaymentRules();
+
+    const finalProducts = PricingEngine.applyDynamicPricing(hydratedProducts, activeRules);
+
     const total = await prisma.product.count({ where: { is_active: true } });
 
     res.status(200).json({
-      data: hydratedProducts,
+      data: finalProducts,
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) }
     });
   } catch (error) {
+    console.error('[ProductsController] Error en getProducts:', error);
     res.status(500).json({ error: 'Error al obtener el catálogo' });
   }
 };
@@ -163,6 +170,12 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
 export const getProductById = async (req: Request, res: Response): Promise<void> => {
   try {
     const id = req.params.id as string;
+
+    const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    if (!uuidRegex.test(id)) {
+      res.status(400).json({ error: 'Formato de ID inválido' });
+      return;
+    }
 
     const product = await prisma.product.findFirst({
       where: { id, is_active: true },
@@ -172,7 +185,8 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
         name: true,
         base_price: true,
         physical_stock: true,
-        is_combo: true
+        is_combo: true,
+        category_id: true
       }
     });
 
@@ -186,8 +200,13 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
       product.physical_stock = virtualStock ?? 0;
     }
 
-    res.status(200).json(product);
+    const activeRules = await RedisService.getActivePaymentRules();
+
+    const [finalProduct] = PricingEngine.applyDynamicPricing([product], activeRules);
+
+    res.status(200).json(finalProduct);
   } catch (error) {
+    console.error('[ProductsController] Error en getProductById:', error);
     res.status(500).json({ error: 'Error al obtener el producto' });
   }
 };

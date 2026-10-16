@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser';
 import authRoutes from './auth/auth.routes';
 import usersRoutes from './users/users.routes';
 import productsRoutes from './products/products.routes';
+import paymentRulesRoutes from './payment-rules/payment-rules.routes';
 
 const prisma = new PrismaClient();
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
@@ -49,6 +50,7 @@ app.use(cookieParser());
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/users', usersRoutes);
 app.use('/api/v1/products', productsRoutes);
+app.use('/api/v1/payment-rules', paymentRulesRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: "Core Engine Operativo", version: "1.0.1" });

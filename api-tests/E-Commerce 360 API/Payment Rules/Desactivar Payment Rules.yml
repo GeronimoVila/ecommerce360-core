@@ -1,0 +1,14 @@
+info:
+  name: Desactivar Payment Rules
+  type: http
+
+http:
+  method: DELETE
+  url: "{{base_url}}/api/v1/payment-rules/f525c523-7d8f-449e-9664-854a43e9dc7c"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

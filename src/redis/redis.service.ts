@@ -1,6 +1,11 @@
 import Redis from 'ioredis';
+import prisma from '../config/prisma';
 
 const redisClient = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+
+const CACHE_KEYS = {
+  PAYMENT_RULES: 'catalog:payment_rules'
+};
 
 export const RedisService = {
   async banToken(jti: string, expTimestamp: number): Promise<void> {
@@ -62,5 +67,34 @@ export const RedisService = {
     });
     
     return result;
+  },
+
+  async getActivePaymentRules(): Promise<any[]> {
+    try {
+      const cachedRules = await redisClient.get(CACHE_KEYS.PAYMENT_RULES);
+      if (cachedRules) {
+        return JSON.parse(cachedRules);
+      }
+
+      const rules = await prisma.paymentRule.findMany({
+        where: { is_active: true }
+      });
+
+      await redisClient.set(CACHE_KEYS.PAYMENT_RULES, JSON.stringify(rules));
+      
+      return rules;
+    } catch (error) {
+      console.error('[RedisService] Error en caché de Payment Rules, fallback a DB:', error);
+      return await prisma.paymentRule.findMany({ where: { is_active: true } });
+    }
+  },
+
+  async invalidatePaymentRules(): Promise<void> {
+    try {
+      await redisClient.del(CACHE_KEYS.PAYMENT_RULES);
+      console.log('[RedisService] Caché de Payment Rules invalidada.');
+    } catch (error) {
+      console.error('[RedisService] Error al invalidar caché:', error);
+    }
   }
 };

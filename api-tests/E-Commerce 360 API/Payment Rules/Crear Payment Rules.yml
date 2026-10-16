@@ -1,0 +1,24 @@
+info:
+  name: Crear Payment Rules
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/payment-rules"
+  body:
+    type: json
+    data: |-
+      {
+        "payment_method": "MOBBEX",
+        "installments": 12,
+        "coefficient": 1.60,
+        "is_global": true
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

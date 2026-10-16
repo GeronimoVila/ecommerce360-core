@@ -1,0 +1,20 @@
+info:
+  name: Modificar Payment Rules
+  type: http
+
+http:
+  method: PATCH
+  url: "{{base_url}}/api/v1/payment-rules/f54f2606-f7d1-4dd0-b5c6-64a03e10392e"
+  body:
+    type: json
+    data: |-
+      {
+        "coefficient": 1.45
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

@@ -33,8 +33,6 @@ export class ComboEngine {
         const finalStock = minVirtualStock === Infinity ? 0 : minVirtualStock;
 
         await RedisService.setComboStock(comboId, finalStock);
-        
-        console.log(`[Combo Engine] Combo ${comboRecipe.sku} recalculado. Nuevo Stock Virtual: ${finalStock}`);
       }
     } catch (error) {
       console.error(`[Combo Engine] Error crítico recalculando cascada para partId ${partId}:`, error);
