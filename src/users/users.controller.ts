@@ -4,6 +4,8 @@ import crypto from 'crypto';
 import prisma from '../config/prisma';
 import { RedisService } from '../redis/redis.service';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export const createSeller = async (req: Request, res: Response): Promise<void> => {
   const { email, first_name, last_name, cbu_alias } = req.body;
 
@@ -125,5 +127,49 @@ export const deactivateUser = async (req: Request, res: Response): Promise<void>
     res.status(200).json({ message: `Cuenta de ${targetUser.role} suspendida correctamente.` });
   } catch (error) {
     res.status(500).json({ error: 'Error al dar de baja el usuario' });
+  }
+};
+
+export const validateSellerId = async (req: Request, res: Response): Promise<Response | void> => {
+  try {
+    const id = req.params.id as string;
+
+    if (!id || typeof id !== 'string' || !UUID_REGEX.test(id)) {
+      return res.status(400).json({ error: 'Formato de Referral ID inválido.' });
+    }
+
+    const cachedData = await RedisService.getSellerValidation(id);
+    
+    if (cachedData) {
+      return res.status(200).json(cachedData);
+    }
+
+    const seller = await prisma.user.findFirst({
+      where: {
+        id: id,
+        role: 'SELLER',
+      },
+      select: {
+        id: true,
+      }
+    });
+
+    if (!seller) {
+      return res.status(404).json({ error: 'Vendedor no encontrado o inactivo.' });
+    }
+
+    const responsePayload = {
+      valid: true,
+      sellerId: seller.id,
+      expiresIn: 86400 
+    };
+
+    await RedisService.setSellerValidation(id, responsePayload, 3600);
+
+    return res.status(200).json(responsePayload);
+
+  } catch (error) {
+    console.error('[UsersController.validateSellerId] Error interno:', error);
+    return res.status(500).json({ error: 'Error procesando la validación de atribución.' });
   }
 };

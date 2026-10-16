@@ -1,0 +1,14 @@
+info:
+  name: Comisión
+  type: http
+
+http:
+  method: GET
+  url: "{{base_url}}/api/v1/users/validate/574fc3a9-07b8-4b8d-bf4e-60441a508cad"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

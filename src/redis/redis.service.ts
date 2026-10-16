@@ -96,5 +96,16 @@ export const RedisService = {
     } catch (error) {
       console.error('[RedisService] Error al invalidar caché:', error);
     }
-  }
+  },
+
+  async setSellerValidation(sellerId: string, payload: any, ttlSeconds: number = 3600): Promise<void> {
+  const key = `seller_validation:${sellerId}`;
+  await redisClient.setex(key, ttlSeconds, JSON.stringify(payload));
+},
+
+async getSellerValidation(sellerId: string): Promise<any | null> {
+  const key = `seller_validation:${sellerId}`;
+  const data = await redisClient.get(key);
+  return data ? JSON.parse(data) : null;
+}
 };
