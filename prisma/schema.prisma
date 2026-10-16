@@ -35,7 +35,6 @@ enum CommissionStatus {
   CANCELED
 }
 
-
 model User {
   id            String   @id @default(uuid()) @db.Uuid
   role          Role     @default(CUSTOMER)
@@ -98,6 +97,7 @@ model Product {
   combos_where_part ComboItem[] @relation("ComboPart")
   combo_parts       ComboItem[] @relation("ComboParent")
   order_items       OrderItem[]
+  supplier_purchases SupplierPurchaseItem[]
 
   created_at      DateTime @default(now())
   updated_at      DateTime @updatedAt
@@ -212,4 +212,30 @@ model PaymentRule {
   @@unique([payment_method, installments, category_id])
   
   @@map("payment_rules")
+}
+
+model SupplierPurchase {
+  id                 String                 @id @default(uuid()) @db.Uuid
+  provider_name      String?                @db.VarChar(150)
+  reference_document String?                @db.VarChar(100)
+  created_at         DateTime               @default(now())
+  
+  items              SupplierPurchaseItem[]
+
+  @@map("supplier_purchases")
+}
+
+model SupplierPurchaseItem {
+  id                 String           @id @default(uuid()) @db.Uuid
+  purchase_id        String           @db.Uuid
+  product_id         String           @db.Uuid
+  
+  quantity_added     Int              
+  stock_before       Int              
+  stock_after        Int              
+
+  purchase           SupplierPurchase @relation(fields: [purchase_id], references: [id], onDelete: Cascade)
+  product            Product          @relation(fields: [product_id], references: [id], onDelete: Restrict)
+
+  @@map("supplier_purchase_items")
 }

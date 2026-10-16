@@ -1,0 +1,28 @@
+info:
+  name: Crear compra a proveedores
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/products/restock"
+  body:
+    type: json
+    data: |-
+      {
+        "provider_name": "Tech S.A.",
+        "reference_document": "REM-006",
+        "items": [
+          {
+            "sku": "IPH-16-PRO-256",
+            "quantity": 5
+          }
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
