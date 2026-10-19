@@ -1,0 +1,21 @@
+info:
+  name: Validación de cupón
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/checkout/coupons/validate"
+  body:
+    type: json
+    data: |-
+      {
+        "code": "VERANO2026",
+        "cartSubtotal": 100000
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

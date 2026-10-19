@@ -1,0 +1,25 @@
+info:
+  name: Sincronización de carrito
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/checkout/cart/sync"
+  body:
+    type: json
+    data: |-
+      {
+        "items": [
+          {
+            "productId": "a9b60c10-3f08-4904-a0a7-097354d04b5c",
+            "quantity": 2
+          }
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

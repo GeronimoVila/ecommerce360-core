@@ -35,6 +35,11 @@ enum CommissionStatus {
   CANCELED
 }
 
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
 model User {
   id            String   @id @default(uuid()) @db.Uuid
   role          Role     @default(CUSTOMER)
@@ -123,6 +128,7 @@ model Order {
   seller_id       String?       @db.Uuid
   status          OrderStatus   @default(PENDING)
   total_amount    Decimal       @db.Decimal(10, 2)
+  coupon_id       String?       @db.Uuid
   coupon_code     String?
   discount_amount Decimal       @default(0) @db.Decimal(10, 2)
   payment_method  PaymentMethod
@@ -135,6 +141,7 @@ model Order {
   
   customer        CustomerProfile? @relation("CustomerOrders", fields: [customer_id], references: [id], onDelete: SetNull)
   seller          SellerProfile?   @relation("SellerAssistedOrders", fields: [seller_id], references: [id], onDelete: SetNull)
+  coupon          Coupon?          @relation(fields: [coupon_id], references: [id], onDelete: SetNull)
   items           OrderItem[]
   commissions     CommissionLedger[]
 
@@ -242,4 +249,26 @@ model SupplierPurchaseItem {
   product            Product          @relation(fields: [product_id], references: [id], onDelete: Restrict)
 
   @@map("supplier_purchase_items")
+}
+
+model Coupon {
+  id                  String       @id @default(uuid()) @db.Uuid
+  code                String       @unique @db.VarChar(50)
+  description         String?
+  discount_type       DiscountType
+  discount_value      Decimal      @db.Decimal(10, 2)
+  min_purchase_amount Decimal?     @db.Decimal(10, 2)
+  max_uses            Int?
+  used_count          Int          @default(0)
+  starts_at           DateTime?    @default(now())
+  expires_at          DateTime?
+  is_active           Boolean      @default(true)
+
+  orders              Order[]
+
+  created_at          DateTime     @default(now())
+  updated_at          DateTime     @updatedAt
+
+  @@index([code])
+  @@map("coupons")
 }
