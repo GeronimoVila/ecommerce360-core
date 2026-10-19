@@ -1,0 +1,29 @@
+info:
+  name: Compra asistida
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/checkout/intent"
+  headers:
+    - name: Cookie
+      value: seller_attribution=574fc3a9-07b8-4b8d-bf4e-60441a508cad
+  body:
+    type: json
+    data: |-
+      {
+        "items": [
+          {
+            "productId": "a9b60c10-3f08-4904-a0a7-097354d04b5c",
+            "quantity": 1
+          }
+        ],
+        "paymentMethod": "MP"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

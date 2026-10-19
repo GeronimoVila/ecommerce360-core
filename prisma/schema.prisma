@@ -141,6 +141,8 @@ model Order {
   created_at      DateTime      @default(now())
   updated_at      DateTime      @updatedAt
 
+  @@index([seller_id])
+  @@index([customer_id])
   @@map("orders")
 }
 
@@ -173,6 +175,8 @@ model CommissionLedger {
   created_at    DateTime         @default(now())
   updated_at    DateTime         @updatedAt
 
+  @@index([seller_id, status])
+  @@index([clearing_date])
   @@map("commission_ledger")
 }
 

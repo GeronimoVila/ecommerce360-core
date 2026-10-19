@@ -7,6 +7,7 @@ import authRoutes from './auth/auth.routes';
 import usersRoutes from './users/users.routes';
 import productsRoutes from './products/products.routes';
 import paymentRulesRoutes from './payment-rules/payment-rules.routes';
+import checkoutRoutes from './checkout/checkout.routes';
 
 const prisma = new PrismaClient();
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
@@ -42,15 +43,19 @@ app.use(cors({
             callback(new Error('Bloqueado por CORS - Origen no autorizado'));
         }
     },
-    credentials: true
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json()); 
-app.use(cookieParser()); 
+app.use(cookieParser());
+
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/users', usersRoutes);
 app.use('/api/v1/products', productsRoutes);
 app.use('/api/v1/payment-rules', paymentRulesRoutes);
+app.use('/api/v1/checkout', checkoutRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: "Core Engine Operativo", version: "1.0.1" });
