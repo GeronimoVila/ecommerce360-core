@@ -1,6 +1,7 @@
 info:
   name: Crear producto
   type: http
+  seq: 1
 
 http:
   method: POST
@@ -9,9 +10,9 @@ http:
     type: json
     data: |-
       {
-        "sku": "IPH-15-PRO-128",
-        "name": "iPhone 15 Pro 128GB",
-        "purchase_cost": 800000,
+        "sku": "IPH-14-PRO-64",
+        "name": "iPhone 14 Pro 64GB",
+        "purchase_cost": 10,
         "vat_rate": 21,
         "profit_margin": 30,
         "physical_stock": 50,

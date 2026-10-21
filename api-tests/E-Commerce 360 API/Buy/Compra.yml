@@ -1,6 +1,7 @@
 info:
   name: Compra
   type: http
+  seq: 1
 
 http:
   method: POST
@@ -12,11 +13,10 @@ http:
         "items": [
           {
             "productId": "a9b60c10-3f08-4904-a0a7-097354d04b5c",
-            "quantity": 2
+            "quantity": 1
           }
         ],
-        "paymentMethod": "TRANSFERENCIA",
-        "customerId": null
+        "paymentMethod": "MP"
       }
   auth: inherit
 
