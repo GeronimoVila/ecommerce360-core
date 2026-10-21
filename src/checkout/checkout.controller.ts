@@ -157,7 +157,11 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
 
             const order = await prisma.order.findUnique({
                 where: { id: orderId },
-                include: { items: true }
+                include: { 
+                    items: { 
+                        include: { product: true } 
+                    } 
+                }
             });
 
             if (!order) {
@@ -176,9 +180,11 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
                     data: { status: 'PAID' }
                 });
 
+                let totalCommissionAmount = 0;
+
                 for (const item of order.items) {
-                    if (!item.product_id) {
-                        console.warn(`[Inventario] El item de la orden ${orderId} no tiene product_id asociado. Se omite actualización de stock.`);
+                    if (!item.product_id || !item.product) {
+                        console.warn(`[Inventario] El item de la orden ${orderId} no tiene producto asociado.`);
                         continue;
                     }
 
@@ -188,10 +194,29 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
                             physical_stock: { decrement: item.quantity }
                         }
                     });
+
+                    const itemTotal = Number(item.unit_price) * item.quantity;
+                    const commissionRate = Number(item.product.commission_rate) / 100;
+                    totalCommissionAmount += (itemTotal * commissionRate);
                 }
 
-                if (order.seller_id) {
-                    console.log(`[Atribución Registrada] Orden ${orderId} asociada al Vendedor ${order.seller_id}.`);
+                if (order.seller_id && totalCommissionAmount > 0) {
+                    const sanitizedCommission = Math.round(totalCommissionAmount * 100) / 100;
+                    
+                    const clearingDate = new Date();
+                    clearingDate.setDate(clearingDate.getDate() + 15);
+
+                    await tx.commissionLedger.create({
+                        data: {
+                            order_id: orderId,
+                            seller_id: order.seller_id,
+                            amount: sanitizedCommission,
+                            status: 'PENDING_CLEARANCE',
+                            clearing_date: clearingDate
+                        }
+                    });
+
+                    console.log(`[FINANZAS - Ledger] Comisión de $${sanitizedCommission} congelada (PENDING) para el Vendedor ${order.seller_id}. Fecha de liberación: ${clearingDate.toISOString()}`);
                 }
             });
 
