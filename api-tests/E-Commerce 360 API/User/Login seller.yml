@@ -1,6 +1,7 @@
 info:
   name: Login seller
   type: http
+  seq: 1
 
 http:
   method: POST
@@ -10,7 +11,7 @@ http:
     data: |-
       {
         "email": "vendedor2@test.com",
-        "password": "3ff0295278639a45"
+        "password": "1a2aada74b2e98c3"
       }
   auth: inherit
 

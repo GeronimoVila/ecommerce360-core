@@ -1,0 +1,27 @@
+info:
+  name: Crear presupuesto
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/checkout/budget/create"
+  body:
+    type: json
+    data: |-
+      {
+        "customerId": "7e0a23b2-4098-44ed-81d9-7ef5eabb5add", 
+        "paymentMethod": "MP",
+        "items": [
+          {
+            "productId": "df84823b-2a8f-4c00-9ceb-8bb478a20e7e",
+            "quantity": 1
+          }
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

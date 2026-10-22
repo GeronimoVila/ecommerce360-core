@@ -1,0 +1,14 @@
+info:
+  name: Pagar presupuesto
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/checkout/budget/3631973d-7e8b-4ae2-82ec-ee3ad878c9cf/pay"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
