@@ -1,6 +1,4 @@
 info:
-  name: budget
+  name: Budget
   type: folder
   seq: 1
-
-request: {}

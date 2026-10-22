@@ -8,6 +8,11 @@ import { RedisService } from '../redis/redis.service';
 export const login = async (req: Request, res: Response): Promise<void> => {
   const { email, password } = req.body;
 
+  if (!email || !password) {
+    res.status(400).json({ error: 'Email y contraseña son obligatorios' });
+    return;
+  }
+
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user || !user.is_active) {
     res.status(401).json({ error: 'Credenciales inválidas o cuenta inactiva' });
@@ -34,7 +39,14 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     maxAge: 15 * 60 * 1000
   });
 
-  res.json({ message: 'Login exitoso', role: user.role });
+  res.json({ 
+    message: 'Login exitoso', 
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role
+    }
+  });
 };
 
 export const logout = async (req: Request, res: Response): Promise<void> => {
@@ -87,4 +99,21 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
     }
     res.status(500).json({ error: 'Error interno al registrar cliente' });
   }
+};
+
+export const getSession = async (req: Request, res: Response): Promise<void> => {
+  const payload = (req as any).user; 
+
+  if (!payload || !payload.sub) {
+    res.status(401).json({ error: 'Sesión inválida' });
+    return;
+  }
+
+  res.json({
+    user: {
+      id: payload.sub,
+      email: payload.email,
+      role: payload.role
+    }
+  });
 };
