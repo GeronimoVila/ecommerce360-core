@@ -121,9 +121,11 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
     const skip = (page - 1) * limit;
+    const userRole = (req as any).user?.role;
+    const whereClause = userRole === 'ADMIN' ? {} : { is_active: true };
 
     const products = await prisma.product.findMany({
-      where: { is_active: true },
+      where: whereClause,
       skip,
       take: limit,
       select: {
@@ -133,7 +135,10 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
         base_price: true,
         physical_stock: true,
         is_combo: true,
-        category_id: true
+        category_id: true,
+        is_active: true,
+        purchase_cost: true,
+        commission_rate: true
       }
     });
 
@@ -155,7 +160,7 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
 
     const finalProducts = PricingEngine.applyDynamicPricing(hydratedProducts, activeRules);
 
-    const total = await prisma.product.count({ where: { is_active: true } });
+    const total = await prisma.product.count({ where: whereClause });
 
     res.status(200).json({
       data: finalProducts,
@@ -186,12 +191,22 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
         base_price: true,
         physical_stock: true,
         is_combo: true,
-        category_id: true
+        category_id: true,
+        purchase_cost: true,
+        vat_rate: true,
+        profit_margin: true,
+        commission_rate: true
       }
     });
 
     if (!product) {
       res.status(404).json({ error: 'Producto no encontrado o inactivo' });
+      return;
+    }
+
+    const userRole = (req as any).user?.role;
+    if (userRole === 'ADMIN' || userRole === 'SELLER') {
+      res.status(200).json(product);
       return;
     }
 
@@ -350,5 +365,41 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
       return;
     }
     res.status(500).json({ error: 'Error interno al crear el combo' });
+  }
+};
+  
+export const getAdminCatalog = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const skip = (page - 1) * limit;
+
+    const products = await prisma.product.findMany({
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        sku: true,
+        name: true,
+        base_price: true,
+        physical_stock: true,
+        is_combo: true,
+        category_id: true,
+        is_active: true,
+        purchase_cost: true,
+        commission_rate: true
+      },
+      orderBy: { created_at: 'desc' }
+    });
+
+    const total = await prisma.product.count();
+
+    res.status(200).json({
+      data: products,
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) }
+    });
+  } catch (error) {
+    console.error('[ProductsController] Error en getAdminCatalog:', error);
+    res.status(500).json({ error: 'Error al obtener el catálogo B2B' });
   }
 };
