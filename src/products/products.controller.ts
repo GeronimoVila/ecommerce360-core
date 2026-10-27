@@ -182,20 +182,23 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
       return;
     }
 
+    const userRole = (req as any).user?.role;
+    
+    const whereClause: any = { id };
+    if (userRole !== 'ADMIN' && userRole !== 'SELLER') {
+      whereClause.is_active = true;
+    }
+
     const product = await prisma.product.findFirst({
-      where: { id, is_active: true },
-      select: {
-        id: true,
-        sku: true,
-        name: true,
-        base_price: true,
-        physical_stock: true,
-        is_combo: true,
-        category_id: true,
-        purchase_cost: true,
-        vat_rate: true,
-        profit_margin: true,
-        commission_rate: true
+      where: whereClause,
+      include: {
+        combo_parts: {
+          include: {
+            product: {
+              select: { sku: true, name: true, physical_stock: true, purchase_cost: true }
+            }
+          }
+        }
       }
     });
 
@@ -204,20 +207,24 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    const userRole = (req as any).user?.role;
     if (userRole === 'ADMIN' || userRole === 'SELLER') {
       res.status(200).json(product);
       return;
     }
 
+    let stockToReport = product.physical_stock;
     if (product.is_combo) {
       const virtualStock = await RedisService.getComboStock(product.id);
-      product.physical_stock = virtualStock ?? 0;
+      stockToReport = virtualStock ?? 0;
     }
 
-    const activeRules = await RedisService.getActivePaymentRules();
+    const responsePayload = {
+      ...product,
+      physical_stock: stockToReport
+    };
 
-    const [finalProduct] = PricingEngine.applyDynamicPricing([product], activeRules);
+    const activeRules = await RedisService.getActivePaymentRules();
+    const [finalProduct] = PricingEngine.applyDynamicPricing([responsePayload], activeRules);
 
     res.status(200).json(finalProduct);
   } catch (error) {
@@ -368,15 +375,131 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
   }
 };
   
+export const updateCombo = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const comboId = req.params.id as string;
+    const { name, base_price, commission_rate, parts } = req.body;
+
+    if (!parts || !Array.isArray(parts) || parts.length === 0) {
+      res.status(400).json({ error: 'Un combo debe contener al menos un componente.' });
+      return;
+    }
+
+    const existingCombo = await prisma.product.findUnique({
+      where: { id: comboId },
+      include: { combo_parts: true }
+    });
+
+    if (!existingCombo || !existingCombo.is_combo) {
+      res.status(404).json({ error: 'Combo no encontrado o el ID pertenece a un producto simple.' });
+      return;
+    }
+
+    const partSkus = parts.map((p: { sku: string; quantity: number }) => p.sku);
+    const dbParts = await prisma.product.findMany({
+      where: { 
+        sku: { in: partSkus },
+        is_active: true
+      }
+    });
+
+    if (dbParts.length !== parts.length) {
+      res.status(404).json({ error: 'Uno o más componentes del combo no existen o están inactivos.' });
+      return;
+    }
+
+    if (dbParts.some(part => part.is_combo)) {
+      res.status(400).json({ error: 'Regla de negocio violada: No se permiten sub-combos.' });
+      return;
+    }
+
+    let minVirtualStock = Infinity;
+    const comboItemsToInsert: { product_id: string; quantity: number }[] = [];
+    const partIdsToRegister: string[] = [];
+
+    for (const item of parts) {
+      const dbPart = dbParts.find(p => p.sku === item.sku)!;
+      const requiredQty = parseInt(item.quantity, 10);
+
+      if (isNaN(requiredQty) || requiredQty <= 0) {
+        res.status(400).json({ error: `La cantidad para el componente ${item.sku} debe ser un entero positivo.` });
+        return;
+      }
+
+      const availableCombosFromPart = Math.floor(dbPart.physical_stock / requiredQty);
+      if (availableCombosFromPart < minVirtualStock) minVirtualStock = availableCombosFromPart;
+
+      comboItemsToInsert.push({ product_id: dbPart.id, quantity: requiredQty });
+      partIdsToRegister.push(dbPart.id);
+    }
+
+    const calculatedVirtualStock = minVirtualStock === Infinity ? 0 : minVirtualStock;
+
+    const updatedCombo = await prisma.$transaction(async (tx) => {
+      await tx.comboItem.deleteMany({
+        where: { combo_id: comboId }
+      });
+
+      return await tx.product.update({
+        where: { id: comboId },
+        data: {
+          name,
+          base_price: new Prisma.Decimal(base_price),
+          commission_rate: new Prisma.Decimal(commission_rate),
+          combo_parts: {
+            create: comboItemsToInsert
+          }
+        },
+        include: {
+          combo_parts: {
+            include: { product: { select: { sku: true, name: true } } }
+          }
+        }
+      });
+    });
+
+    await RedisService.setComboStock(comboId, calculatedVirtualStock);
+    
+    const oldPartIds = existingCombo.combo_parts.map((cp: any) => cp.product_id);
+    if (oldPartIds.length > 0) {
+        await RedisService.removeComboDependencies(comboId, oldPartIds); 
+    }
+    
+    await RedisService.registerComboDependencies(comboId, partIdsToRegister);
+
+    res.status(200).json({
+      message: 'Combo actualizado exitosamente.',
+      combo: {
+        id: updatedCombo.id,
+        sku: updatedCombo.sku,
+        name: updatedCombo.name,
+        base_price: updatedCombo.base_price,
+        virtual_stock: calculatedVirtualStock,
+      }
+    });
+
+  } catch (error: any) {
+    console.error('[ProductsController] Error en updateCombo:', error);
+    res.status(500).json({ error: 'Error interno al actualizar el combo' });
+  }
+};
+
 export const getAdminCatalog = async (req: Request, res: Response): Promise<void> => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
     const skip = (page - 1) * limit;
+    
+    const type = req.query.type as string;
+
+    const whereClause: Prisma.ProductWhereInput = {};
+    if (type === 'simple') whereClause.is_combo = false;
+    if (type === 'combo') whereClause.is_combo = true;
 
     const products = await prisma.product.findMany({
       skip,
       take: limit,
+      where: whereClause,
       select: {
         id: true,
         sku: true,
@@ -387,15 +510,44 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
         category_id: true,
         is_active: true,
         purchase_cost: true,
-        commission_rate: true
+        commission_rate: true,
+        combo_parts: {
+          include: {
+            product: {
+              select: { sku: true, name: true, purchase_cost: true, physical_stock: true }
+            }
+          }
+        }
       },
       orderBy: { created_at: 'desc' }
     });
 
-    const total = await prisma.product.count();
+    const comboIds = products.filter(p => p.is_combo).map(p => p.id);
+    const comboStocks = comboIds.length > 0 
+      ? await RedisService.getMultipleComboStocks(comboIds) 
+      : {};
+
+    const hydratedProducts = products.map(product => {
+      if (product.is_combo) {
+        const dynamicCost = product.combo_parts.reduce((acc, part) => {
+          return acc + (Number(part.product.purchase_cost) * part.quantity);
+        }, 0);
+
+        return {
+          ...product,
+          physical_stock: comboStocks[product.id] ?? 0,
+          purchase_cost: new Prisma.Decimal(dynamicCost),
+        };
+      }
+      
+      const { combo_parts, ...simpleProduct } = product;
+      return simpleProduct;
+    });
+
+    const total = await prisma.product.count({ where: whereClause });
 
     res.status(200).json({
-      data: products,
+      data: hydratedProducts,
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) }
     });
   } catch (error) {

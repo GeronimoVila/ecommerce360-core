@@ -50,6 +50,16 @@ export const RedisService = {
     await pipeline.exec();
   },
 
+  async removeComboDependencies(comboId: string, oldPartIds: string[]): Promise<void> {
+    if (oldPartIds.length === 0) return;
+    
+    const pipeline = redisClient.pipeline();
+    for (const partId of oldPartIds) {
+      pipeline.srem(`part:combos:${partId}`, comboId); 
+    }
+    await pipeline.exec();
+  },
+
   async getCombosByPart(partId: string): Promise<string[]> {
     return await redisClient.smembers(`part:combos:${partId}`);
   },
@@ -99,13 +109,13 @@ export const RedisService = {
   },
 
   async setSellerValidation(sellerId: string, payload: any, ttlSeconds: number = 3600): Promise<void> {
-  const key = `seller_validation:${sellerId}`;
-  await redisClient.setex(key, ttlSeconds, JSON.stringify(payload));
-},
+    const key = `seller_validation:${sellerId}`;
+    await redisClient.setex(key, ttlSeconds, JSON.stringify(payload));
+  },
 
-async getSellerValidation(sellerId: string): Promise<any | null> {
-  const key = `seller_validation:${sellerId}`;
-  const data = await redisClient.get(key);
-  return data ? JSON.parse(data) : null;
-}
+  async getSellerValidation(sellerId: string): Promise<any | null> {
+    const key = `seller_validation:${sellerId}`;
+    const data = await redisClient.get(key);
+    return data ? JSON.parse(data) : null;
+  }
 };
