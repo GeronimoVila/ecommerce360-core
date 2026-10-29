@@ -58,10 +58,19 @@ export const processRestock = async (req: Request, res: Response): Promise<void>
     }
 
     const { updatedParts, purchaseRecord } = await prisma.$transaction(async (tx) => {
+      
+      let supplierId = null;
+      if (provider_name) {
+        const supplier = await tx.supplier.findUnique({
+          where: { name: provider_name }
+        });
+        if (supplier) supplierId = supplier.id;
+      }
 
       const purchase = await tx.supplierPurchase.create({
         data: {
           provider_name: provider_name || null,
+          supplier_id: supplierId,
           reference_document: reference_document || null,
         }
       });

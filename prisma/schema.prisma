@@ -225,12 +225,28 @@ model PaymentRule {
   @@map("payment_rules")
 }
 
+model Supplier {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String   @unique
+  tax_id     String?
+  email      String?
+  phone      String?
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  purchases  SupplierPurchase[]
+
+  @@map("suppliers")
+}
+
 model SupplierPurchase {
-  id                 String                 @id @default(uuid()) @db.Uuid
-  provider_name      String?                @db.VarChar(150)
-  reference_document String?                @db.VarChar(100)
-  created_at         DateTime               @default(now())
+  id                 String   @id @default(uuid()) @db.Uuid
+  provider_name      String?  @db.VarChar(150)
+  supplier_id        String?  @db.Uuid
+  reference_document String?  @db.VarChar(100)
+  created_at         DateTime @default(now())
   
+  supplier           Supplier? @relation(fields: [supplier_id], references: [id], onDelete: SetNull)
   items              SupplierPurchaseItem[]
 
   @@map("supplier_purchases")
