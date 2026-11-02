@@ -55,7 +55,7 @@ export const createSeller = async (req: Request, res: Response): Promise<void> =
 
 export const updateUser = async (req: Request, res: Response): Promise<void> => {
   const targetId = req.params.id as string;
-  const { email, first_name, last_name, phone, cbu_alias } = req.body;
+  const { email, first_name, last_name, phone, cbu_alias, is_active } = req.body;
 
   try {
     const targetUser = await prisma.user.findUnique({ 
@@ -74,22 +74,47 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
     }
 
     await prisma.$transaction(async (tx) => {
-      if (email) {
-        await tx.user.update({ where: { id: targetId }, data: { email } });
+      const userUpdateData: any = {};
+      if (email !== undefined) userUpdateData.email = email;
+      if (is_active !== undefined) userUpdateData.is_active = is_active;
+
+      if (Object.keys(userUpdateData).length > 0) {
+        await tx.user.update({ 
+          where: { id: targetId }, 
+          data: userUpdateData 
+        });
       }
 
       if (targetUser.role === 'SELLER' && targetUser.seller_profile) {
-        await tx.sellerProfile.update({
-          where: { id: targetUser.seller_profile.id },
-          data: { first_name, last_name, cbu_alias }
-        });
+        const sellerUpdateData: any = {};
+        if (first_name !== undefined) sellerUpdateData.first_name = first_name;
+        if (last_name !== undefined) sellerUpdateData.last_name = last_name;
+        if (cbu_alias !== undefined) sellerUpdateData.cbu_alias = cbu_alias;
+
+        if (Object.keys(sellerUpdateData).length > 0) {
+          await tx.sellerProfile.update({
+            where: { id: targetUser.seller_profile.id },
+            data: sellerUpdateData
+          });
+        }
       } else if (targetUser.role === 'CUSTOMER' && targetUser.customer_profile) {
-        await tx.customerProfile.update({
-          where: { id: targetUser.customer_profile.id },
-          data: { first_name, last_name, phone }
-        });
+        const customerUpdateData: any = {};
+        if (first_name !== undefined) customerUpdateData.first_name = first_name;
+        if (last_name !== undefined) customerUpdateData.last_name = last_name;
+        if (phone !== undefined) customerUpdateData.phone = phone;
+
+        if (Object.keys(customerUpdateData).length > 0) {
+          await tx.customerProfile.update({
+            where: { id: targetUser.customer_profile.id },
+            data: customerUpdateData
+          });
+        }
       }
     });
+
+    if (is_active === true) {
+      await RedisService.unbanUserId(targetId);
+    }
 
     res.status(200).json({ message: 'Usuario actualizado exitosamente' });
   } catch (error: any) {
@@ -97,6 +122,7 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
       res.status(409).json({ error: 'El email ya está en uso por otra cuenta' });
       return;
     }
+    console.error('[UsersController.updateUser] Error:', error);
     res.status(500).json({ error: 'Error interno al actualizar usuario' });
   }
 };
@@ -171,5 +197,34 @@ export const validateSellerId = async (req: Request, res: Response): Promise<Res
   } catch (error) {
     console.error('[UsersController.validateSellerId] Error interno:', error);
     return res.status(500).json({ error: 'Error procesando la validación de atribución.' });
+  }
+};
+
+export const getSellers = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const sellers = await prisma.user.findMany({
+      where: { role: 'SELLER' },
+      select: {
+        id: true,
+        email: true,
+        is_active: true,
+        created_at: true,
+        seller_profile: {
+          select: {
+            id: true,
+            first_name: true,
+            last_name: true,
+            ref_code: true,
+            cbu_alias: true
+          }
+        }
+      },
+      orderBy: { created_at: 'desc' }
+    });
+
+    res.status(200).json({ data: sellers });
+  } catch (error) {
+    console.error('[UsersController] Error al obtener sellers:', error);
+    res.status(500).json({ error: 'Error al obtener la lista de vendedores.' });
   }
 };

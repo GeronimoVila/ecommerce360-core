@@ -33,6 +33,14 @@ export const RedisService = {
     return result !== null;
   },
 
+  async unbanUserId(userId: string): Promise<void> {
+    try {
+      await redisClient.del(`banned_user:${userId}`);
+    } catch (error) {
+      console.error(`[RedisService] Error eliminando baneo del usuario ${userId}:`, error);
+    }
+  },
+
   async setComboStock(comboId: string, stock: number): Promise<void> {
     await redisClient.setex(`combo:stock:${comboId}`, 86400, stock.toString());
   },
