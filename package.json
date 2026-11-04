@@ -30,6 +30,7 @@
     "uuid": "^14.0.2"
   },
   "dependencies": {
+    "@ngrok/nextjs": "^0.1.0",
     "axios": "^1.20.0",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",

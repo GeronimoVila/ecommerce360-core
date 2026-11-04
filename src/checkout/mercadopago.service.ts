@@ -1,4 +1,4 @@
-import { MercadoPagoConfig, Preference } from 'mercadopago';
+import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 
 const mpClient = new MercadoPagoConfig({ 
     accessToken: process.env.MP_ACCESS_TOKEN || '', 
@@ -48,7 +48,7 @@ export const createMpPreference = async (orderId: string, items: MpItem[], custo
 
         if (process.env.WEBHOOK_URL && process.env.WEBHOOK_URL.startsWith('http')) {
             const baseWebhookUrl = process.env.WEBHOOK_URL.replace(/\/$/, '');
-            body.notification_url = `${baseWebhookUrl}/api/v1/checkout/webhook/mp`;
+            body.notification_url = `${baseWebhookUrl}/api/v1/checkout/budget/webhook/mp`;
         }
 
         const result = await preference.create({ body });
@@ -61,5 +61,16 @@ export const createMpPreference = async (orderId: string, items: MpItem[], custo
     } catch (error: any) {
         console.error('[MP Service] Error detallado:', JSON.stringify(error.cause || error, null, 2));
         throw new Error('Fallo en la integración con la pasarela de pagos.');
+    }
+};
+
+export const getMpPaymentById = async (paymentId: string | number) => {
+    try {
+        const payment = new Payment(mpClient);
+        const result = await payment.get({ id: Number(paymentId) });
+        return result;
+    } catch (error) {
+        console.error('[MP Service] Error al consultar pago:', error);
+        throw new Error('No se pudo verificar la transacción en Mercado Pago.');
     }
 };

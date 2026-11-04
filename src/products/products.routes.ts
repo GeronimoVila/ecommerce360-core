@@ -16,7 +16,7 @@ import { requireAuth } from '../common/guards/auth.guard';
 const router = Router();
 
 
-router.get('/', getProducts);
+router.get('/', requireAuth(['ADMIN', 'SELLER']), getProducts);
 router.get('/admin', requireAuth(['ADMIN']), getAdminCatalog);
 router.post('/restock', requireAuth(['ADMIN']), processRestock);
 router.get('/restock/all', requireAuth(['ADMIN']), getSupplierPurchases);
