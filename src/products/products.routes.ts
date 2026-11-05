@@ -8,14 +8,17 @@ import {
   reactivateProduct,
   createCombo,
   updateCombo,
-  getAdminCatalog
+  getAdminCatalog,
+  getStorefrontCatalog,
+  getStorefrontProductById
 } from './products.controller';
 import { processRestock, getSupplierPurchases, updateSupplierPurchaseMetadata } from './inventory.controller';
 import { requireAuth } from '../common/guards/auth.guard';
 
 const router = Router();
 
-
+router.get('/storefront/:id', getStorefrontProductById);
+router.get('/storefront', getStorefrontCatalog);
 router.get('/', requireAuth(['ADMIN', 'SELLER']), getProducts);
 router.get('/admin', requireAuth(['ADMIN']), getAdminCatalog);
 router.post('/restock', requireAuth(['ADMIN']), processRestock);

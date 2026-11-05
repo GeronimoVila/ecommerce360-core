@@ -555,3 +555,108 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
     res.status(500).json({ error: 'Error al obtener el catálogo B2B' });
   }
 };
+
+export const getStorefrontCatalog = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const skip = (page - 1) * limit;
+
+    const whereClause: Prisma.ProductWhereInput = { is_active: true };
+
+    const products = await prisma.product.findMany({
+      where: whereClause,
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        sku: true,
+        name: true,
+        base_price: true,
+        physical_stock: true,
+        is_combo: true,
+        category_id: true,
+      }
+    });
+
+    const comboIds = products.filter(p => p.is_combo).map(p => p.id);
+    const comboStocks = comboIds.length > 0 
+      ? await RedisService.getMultipleComboStocks(comboIds) 
+      : {};
+
+    const hydratedProducts = products.map(product => {
+      if (product.is_combo) {
+        return { ...product, physical_stock: comboStocks[product.id] ?? 0 };
+      }
+      return product;
+    });
+
+    const availableProducts = hydratedProducts.filter(p => p.physical_stock > 0);
+
+    const activeRules = await RedisService.getActivePaymentRules();
+    const finalProducts = PricingEngine.applyDynamicPricing(availableProducts, activeRules);
+
+    const total = await prisma.product.count({ where: whereClause });
+
+    res.status(200).json({
+      data: finalProducts,
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) }
+    });
+  } catch (error) {
+    console.error('[ProductsController] Error en getStorefrontCatalog:', error);
+    res.status(500).json({ error: 'Error al cargar la vitrina pública' });
+  }
+};
+
+export const getStorefrontProductById = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = req.params.id as string;
+
+    const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    if (!uuidRegex.test(id)) {
+      res.status(400).json({ error: 'Formato de ID inválido en la URL' });
+      return;
+    }
+
+    const product = await prisma.product.findFirst({
+      where: { id, is_active: true },
+      select: {
+        id: true,
+        sku: true,
+        name: true,
+        base_price: true,
+        physical_stock: true,
+        is_combo: true,
+        category_id: true,
+        combo_parts: {
+          include: {
+            product: {
+              select: { sku: true, name: true, physical_stock: true }
+            }
+          }
+        }
+      }
+    });
+
+    if (!product) {
+      res.status(404).json({ error: 'Producto no encontrado o inactivo' });
+      return;
+    }
+
+    let stockToReport = product.physical_stock;
+    if (product.is_combo) {
+      const virtualStock = await RedisService.getComboStock(product.id);
+      stockToReport = virtualStock ?? 0;
+    }
+
+    const responsePayload = { ...product, physical_stock: stockToReport };
+
+    const activeRules = await RedisService.getActivePaymentRules();
+    const [finalProduct] = PricingEngine.applyDynamicPricing([responsePayload], activeRules);
+
+    res.status(200).json(finalProduct);
+  } catch (error) {
+    console.error('[ProductsController] Error en getStorefrontProductById:', error);
+    res.status(500).json({ error: 'Error al obtener el detalle del producto' });
+  }
+};
