@@ -7,6 +7,6 @@ const router = Router();
 router.post('/login', login);
 router.post('/logout', requireAuth([]), logout);
 router.post('/register', registerCustomer);
-router.get('/me', requireAuth(['SELLER', 'ADMIN']), getSession);
+router.get('/me', requireAuth(['SELLER', 'ADMIN', 'CUSTOMER']), getSession);
 
 export default router;
