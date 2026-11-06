@@ -250,12 +250,17 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
 
                 if (order.seller_id && totalCommission > 0) {
                     if (order.seller_id !== order.customer_id) {
+                        
+                        const clearingDate = new Date();
+                        clearingDate.setDate(clearingDate.getDate() + 15);
+
                         await tx.commissionLedger.create({
                             data: {
                                 order_id: order.id,
                                 seller_id: order.seller_id,
                                 amount: totalCommission,
-                                status: 'PENDING_CLEARANCE'
+                                status: 'PENDING_CLEARANCE',
+                                clearing_date: clearingDate
                             }
                         });
                     } else {

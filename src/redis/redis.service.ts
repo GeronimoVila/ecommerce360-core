@@ -8,6 +8,27 @@ const CACHE_KEYS = {
 };
 
 export const RedisService = {
+
+  /**
+   * Adquiere un bloqueo distribuido.
+   * Vital para prevenir Race Conditions en cronjobs o doble procesamiento de pagos.
+   * @param key Identificador único del bloqueo
+   * @param ttlSeconds Tiempo de expiración (Fail-safe contra deadlocks si el servidor cae)
+   * @returns boolean - true si se adquirió con éxito, false si ya estaba en uso
+   */
+  async acquireLock(key: string, ttlSeconds: number): Promise<boolean> {
+    const result = await redisClient.set(key, 'LOCKED', 'EX', ttlSeconds, 'NX');
+    return result === 'OK';
+  },
+
+  /**
+   * Libera un bloqueo distribuido manualmente.
+   * @param key Identificador único del bloqueo
+   */
+  async releaseLock(key: string): Promise<void> {
+    await redisClient.del(key);
+  },
+
   async banToken(jti: string, expTimestamp: number): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     const ttl = expTimestamp - now;

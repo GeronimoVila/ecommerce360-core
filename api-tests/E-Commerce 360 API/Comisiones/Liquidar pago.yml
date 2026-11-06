@@ -1,0 +1,25 @@
+info:
+  name: Liquidar pago
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/v1/commissions/liquidate"
+  body:
+    type: json
+    data: |-
+      {
+        "seller_id": "7885bde7-6724-4e87-a6ac-fc1e098ea4c9",
+        "transaction_ref": "TXN-BANK-9988776655", 
+        "commission_ids": [
+          "1840ab59-1119-4254-ac83-fd9ad4b3ad64",
+          "7ad6115f-4675-4d98-9b78-ab4ad0002ac9"
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

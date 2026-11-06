@@ -2,11 +2,14 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { RedisService } from '../../redis/redis.service';
 
-export const requireAuth = (allowedRoles: string[]) => {
+export const requireAuth = (allowedRoles: string[] = []) => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
+      let token = req.cookies?.access_token;
 
-      const token = req.cookies?.access_token; 
+      if (!token && req.headers.authorization?.startsWith('Bearer ')) {
+        token = req.headers.authorization.split(' ')[1];
+      }
       
       if (!token) {
         res.status(401).json({ error: 'Acceso denegado. Token no proporcionado.' });

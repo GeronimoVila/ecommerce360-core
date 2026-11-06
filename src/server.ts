@@ -10,6 +10,8 @@ import paymentRulesRoutes from './payment-rules/payment-rules.routes';
 import checkoutRoutes from './checkout/checkout.routes';
 import budgetRoutes from './checkout/budget.routes';
 import suppliersRoutes from './suppliers/suppliers.routes';
+import { startMaturationCron } from './commissions/maturation.cron';
+import commissionsRoutes from './commissions/commissions.routes';
 
 const prisma = new PrismaClient();
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
@@ -61,6 +63,7 @@ app.use('/api/v1/payment-rules', paymentRulesRoutes);
 app.use('/api/v1/checkout', checkoutRoutes);
 app.use('/api/v1/checkout/budget', budgetRoutes);
 app.use('/api/v1/suppliers', suppliersRoutes);
+app.use('/api/v1/commissions', commissionsRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: "Core Engine Operativo", version: "1.0.1" });
@@ -84,6 +87,9 @@ async function bootstrap() {
         
         app.listen(port, () => {
             console.log(`🚀 API Gateway escuchando en el puerto ${port}`);
+            
+            startMaturationCron(); 
+            console.log("⏳ Servicio de maduración de comisiones iniciado.");
         });
     } catch (error) {
         console.error("❌ Fallo crítico en infraestructura principal:", error);

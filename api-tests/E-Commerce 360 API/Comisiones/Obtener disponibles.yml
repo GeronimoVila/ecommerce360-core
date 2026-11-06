@@ -1,0 +1,14 @@
+info:
+  name: Obtener disponibles
+  type: http
+
+http:
+  method: GET
+  url: "{{base_url}}/api/v1/commissions/available"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

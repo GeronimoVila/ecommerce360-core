@@ -41,71 +41,78 @@ enum DiscountType {
 }
 
 model User {
-  id            String   @id @default(uuid()) @db.Uuid
-  role          Role     @default(CUSTOMER)
-  email         String   @unique
+  id            String  @id @default(uuid()) @db.Uuid
+  role          Role    @default(CUSTOMER)
+  email         String  @unique
   password_hash String
-  is_active     Boolean  @default(true)
+  is_active     Boolean @default(true)
 
   customer_profile CustomerProfile?
   seller_profile   SellerProfile?
 
-  created_at    DateTime @default(now())
-  updated_at    DateTime @updatedAt
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
   @@map("users")
 }
 
 model CustomerProfile {
-  id              String  @id @default(uuid()) @db.Uuid
-  user_id         String  @unique @db.Uuid
-  first_name      String?
-  last_name       String?
-  phone           String?
-  
-  user            User           @relation(fields: [user_id], references: [id], onDelete: Cascade)
-  orders          Order[]        @relation("CustomerOrders")
+  id         String  @id @default(uuid()) @db.Uuid
+  user_id    String  @unique @db.Uuid
+  first_name String?
+  last_name  String?
+  phone      String?
+
+  user   User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  orders Order[] @relation("CustomerOrders")
 
   @@map("customer_profiles")
 }
 
 model SellerProfile {
-  id              String  @id @default(uuid()) @db.Uuid
-  user_id         String  @unique @db.Uuid
-  ref_code        String  @unique
-  first_name      String
-  last_name       String
-  cbu_alias       String?
-  
+  id         String  @id @default(uuid()) @db.Uuid
+  user_id    String  @unique @db.Uuid
+  ref_code   String  @unique
+  first_name String
+  last_name  String
+  cbu_alias  String?
+
+  manager_id   String?         @db.Uuid
+  manager      SellerProfile?  @relation("SellerHierarchy", fields: [manager_id], references: [id])
+  subordinates SellerProfile[] @relation("SellerHierarchy")
+
   user            User               @relation(fields: [user_id], references: [id], onDelete: Cascade)
   assisted_orders Order[]            @relation("SellerAssistedOrders")
   commissions     CommissionLedger[] @relation("SellerCommissions")
+  Payout          Payout[]
 
   @@map("seller_profiles")
 }
 
 model Product {
-  id              String      @id @default(uuid()) @db.Uuid
-  sku             String      @unique
-  name            String
-  purchase_cost   Decimal     @default(0) @db.Decimal(10, 2)
-  vat_rate        Decimal     @default(21) @db.Decimal(5, 2)
-  profit_margin   Decimal     @default(0) @db.Decimal(5, 2)
-  base_price      Decimal     @db.Decimal(10, 2)
-  physical_stock  Int         @default(0)
-  is_combo        Boolean     @default(false)
-  commission_rate Decimal     @db.Decimal(5, 2)
-  is_active       Boolean     @default(true)
-  category_id     String?     @db.Uuid
-  category        Category?   @relation(fields: [category_id], references: [id], onDelete: SetNull)
-  payment_rules   PaymentRule[]
-  combos_where_part ComboItem[] @relation("ComboPart")
-  combo_parts       ComboItem[] @relation("ComboParent")
-  order_items       OrderItem[]
+  id                 String                 @id @default(uuid()) @db.Uuid
+  sku                String                 @unique
+  name               String
+  purchase_cost      Decimal                @default(0) @db.Decimal(10, 2)
+  vat_rate           Decimal                @default(21) @db.Decimal(5, 2)
+  profit_margin      Decimal                @default(0) @db.Decimal(5, 2)
+  base_price         Decimal                @db.Decimal(10, 2)
+  physical_stock     Int                    @default(0)
+  reserved_stock     Int                    @default(0)
+  version            Int                    @default(1)
+  is_combo           Boolean                @default(false)
+  commission_rate    Decimal                @db.Decimal(5, 2)
+  is_active          Boolean                @default(true)
+  category_id        String?                @db.Uuid
+  category           Category?              @relation(fields: [category_id], references: [id], onDelete: SetNull)
+  payment_rules      PaymentRule[]
+  combos_where_part  ComboItem[]            @relation("ComboPart")
+  combo_parts        ComboItem[]            @relation("ComboParent")
+  order_items        OrderItem[]
   supplier_purchases SupplierPurchaseItem[]
 
-  created_at      DateTime @default(now())
-  updated_at      DateTime @updatedAt
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
   @@map("products")
 }
@@ -132,21 +139,21 @@ model Order {
   coupon_code     String?
   discount_amount Decimal       @default(0) @db.Decimal(10, 2)
   payment_method  PaymentMethod
-  
-  gateway_txn_id  String?       @unique 
-  gateway_metadata Json?
-  
-  shipping_cp     String?
-  shipping_address Json?
-  
-  customer        CustomerProfile? @relation("CustomerOrders", fields: [customer_id], references: [id], onDelete: SetNull)
-  seller          SellerProfile?   @relation("SellerAssistedOrders", fields: [seller_id], references: [id], onDelete: SetNull)
-  coupon          Coupon?          @relation(fields: [coupon_id], references: [id], onDelete: SetNull)
-  items           OrderItem[]
-  commissions     CommissionLedger[]
 
-  created_at      DateTime      @default(now())
-  updated_at      DateTime      @updatedAt
+  gateway_txn_id   String? @unique
+  gateway_metadata Json?
+
+  shipping_cp      String?
+  shipping_address Json?
+
+  customer    CustomerProfile?   @relation("CustomerOrders", fields: [customer_id], references: [id], onDelete: SetNull)
+  seller      SellerProfile?     @relation("SellerAssistedOrders", fields: [seller_id], references: [id], onDelete: SetNull)
+  coupon      Coupon?            @relation(fields: [coupon_id], references: [id], onDelete: SetNull)
+  items       OrderItem[]
+  commissions CommissionLedger[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
   @@index([seller_id])
   @@index([customer_id])
@@ -154,33 +161,51 @@ model Order {
 }
 
 model OrderItem {
-  id         String   @id @default(uuid()) @db.Uuid
-  order_id   String   @db.Uuid
-  product_id String?  @db.Uuid
+  id         String  @id @default(uuid()) @db.Uuid
+  order_id   String  @db.Uuid
+  product_id String? @db.Uuid
   quantity   Int
-  
-  unit_price Decimal  @db.Decimal(10, 2) 
-  pure_base_price Decimal  @db.Decimal(10, 2)
-  
-  order      Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
-  product    Product? @relation(fields: [product_id], references: [id], onDelete: SetNull)
+
+  unit_price              Decimal @db.Decimal(10, 2)
+  pure_base_price         Decimal @db.Decimal(10, 2)
+  applied_commission_rate Decimal @default(0) @db.Decimal(5, 2)
+
+  order   Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [product_id], references: [id], onDelete: SetNull)
 
   @@map("order_items")
+}
+
+model Payout {
+  id              String   @id @default(uuid()) @db.Uuid
+  seller_id       String   @db.Uuid
+  total_amount    Decimal  @db.Decimal(10, 2)
+  transaction_ref String   @unique
+  status          String   @default("COMPLETED")
+  created_at      DateTime @default(now())
+
+  seller      SellerProfile      @relation(fields: [seller_id], references: [id])
+  commissions CommissionLedger[]
+
+  @@map("payouts")
 }
 
 model CommissionLedger {
   id            String           @id @default(uuid()) @db.Uuid
   order_id      String           @db.Uuid
   seller_id     String           @db.Uuid
+  payout_id     String?          @db.Uuid
   amount        Decimal          @db.Decimal(10, 2)
   status        CommissionStatus @default(PENDING_CLEARANCE)
   clearing_date DateTime?
-  
-  order         Order            @relation(fields: [order_id], references: [id])
-  seller        SellerProfile    @relation("SellerCommissions", fields: [seller_id], references: [id])
 
-  created_at    DateTime         @default(now())
-  updated_at    DateTime         @updatedAt
+  order  Order         @relation(fields: [order_id], references: [id])
+  seller SellerProfile @relation("SellerCommissions", fields: [seller_id], references: [id])
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  Payout     Payout?  @relation(fields: [payoutId], references: [id])
+  payoutId   String?  @db.Uuid
 
   @@index([seller_id, status])
   @@index([clearing_date])
@@ -188,40 +213,39 @@ model CommissionLedger {
 }
 
 model Category {
-  id            String        @id @default(uuid()) @db.Uuid
-  name          String
-  slug          String        @unique
-  is_active     Boolean       @default(true)
+  id        String  @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String  @unique
+  is_active Boolean @default(true)
 
   products      Product[]
   payment_rules PaymentRule[]
 
-  created_at    DateTime      @default(now())
-  updated_at    DateTime      @updatedAt
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
   @@map("categories")
 }
 
 model PaymentRule {
-  id              String        @id @default(uuid()) @db.Uuid
-  payment_method  PaymentMethod
-  installments    Int           @default(1)
-  coefficient     Decimal       @db.Decimal(5, 4)
-  is_active       Boolean       @default(true)
+  id             String        @id @default(uuid()) @db.Uuid
+  payment_method PaymentMethod
+  installments   Int           @default(1)
+  coefficient    Decimal       @db.Decimal(5, 4)
+  is_active      Boolean       @default(true)
 
-  is_global       Boolean       @default(false)
-  category_id     String?       @db.Uuid
-  product_id      String?       @db.Uuid
+  is_global   Boolean @default(false)
+  category_id String? @db.Uuid
+  product_id  String? @db.Uuid
 
-  category        Category?     @relation(fields: [category_id], references: [id], onDelete: Cascade)
-  product         Product?      @relation(fields: [product_id], references: [id], onDelete: Cascade)
+  category Category? @relation(fields: [category_id], references: [id], onDelete: Cascade)
+  product  Product?  @relation(fields: [product_id], references: [id], onDelete: Cascade)
 
-  created_at      DateTime      @default(now())
-  updated_at      DateTime      @updatedAt
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
   @@unique([payment_method, installments, product_id])
   @@unique([payment_method, installments, category_id])
-  
   @@map("payment_rules")
 }
 
@@ -234,7 +258,7 @@ model Supplier {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  purchases  SupplierPurchase[]
+  purchases SupplierPurchase[]
 
   @@map("suppliers")
 }
@@ -245,24 +269,24 @@ model SupplierPurchase {
   supplier_id        String?  @db.Uuid
   reference_document String?  @db.VarChar(100)
   created_at         DateTime @default(now())
-  
-  supplier           Supplier? @relation(fields: [supplier_id], references: [id], onDelete: SetNull)
-  items              SupplierPurchaseItem[]
+
+  supplier Supplier?              @relation(fields: [supplier_id], references: [id], onDelete: SetNull)
+  items    SupplierPurchaseItem[]
 
   @@map("supplier_purchases")
 }
 
 model SupplierPurchaseItem {
-  id                 String           @id @default(uuid()) @db.Uuid
-  purchase_id        String           @db.Uuid
-  product_id         String           @db.Uuid
-  
-  quantity_added     Int              
-  stock_before       Int              
-  stock_after        Int              
+  id          String @id @default(uuid()) @db.Uuid
+  purchase_id String @db.Uuid
+  product_id  String @db.Uuid
 
-  purchase           SupplierPurchase @relation(fields: [purchase_id], references: [id], onDelete: Cascade)
-  product            Product          @relation(fields: [product_id], references: [id], onDelete: Restrict)
+  quantity_added Int
+  stock_before   Int
+  stock_after    Int
+
+  purchase SupplierPurchase @relation(fields: [purchase_id], references: [id], onDelete: Cascade)
+  product  Product          @relation(fields: [product_id], references: [id], onDelete: Restrict)
 
   @@map("supplier_purchase_items")
 }
@@ -280,10 +304,10 @@ model Coupon {
   expires_at          DateTime?
   is_active           Boolean      @default(true)
 
-  orders              Order[]
+  orders Order[]
 
-  created_at          DateTime     @default(now())
-  updated_at          DateTime     @updatedAt
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
   @@index([code])
   @@map("coupons")
