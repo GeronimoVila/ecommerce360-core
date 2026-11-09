@@ -12,6 +12,7 @@ import budgetRoutes from './checkout/budget.routes';
 import suppliersRoutes from './suppliers/suppliers.routes';
 import { startMaturationCron } from './commissions/maturation.cron';
 import commissionsRoutes from './commissions/commissions.routes';
+import ordersRoutes from './orders/orders.routes';
 
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -61,6 +62,7 @@ app.use('/api/v1/checkout', checkoutRoutes);
 app.use('/api/v1/checkout/budget', budgetRoutes);
 app.use('/api/v1/suppliers', suppliersRoutes);
 app.use('/api/v1/commissions', commissionsRoutes);
+app.use('/api/v1/orders', ordersRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: "Core Engine Operativo", version: "1.0.1" });
