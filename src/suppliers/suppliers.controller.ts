@@ -1,9 +1,8 @@
 import { Request, Response } from 'express';
-import prisma from '../config/prisma';
 
 export const getSuppliers = async (req: Request, res: Response): Promise<void> => {
   try {
-    const suppliers = await prisma.supplier.findMany({
+    const suppliers = await req.prisma.supplier.findMany({
       orderBy: { name: 'asc' }
     });
     res.status(200).json(suppliers);
@@ -22,7 +21,7 @@ export const createSupplier = async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    const newSupplier = await prisma.supplier.create({
+    const newSupplier = await req.prisma.supplier.create({
       data: { name, tax_id, email, phone }
     });
 

@@ -1,11 +1,10 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
-import prisma from '../config/prisma';
 
 export const getMyProfile = async (req: Request, res: Response): Promise<void> => {
   try {
-    const userId = req.user.sub;
-    const user = await prisma.user.findUnique({
+    const userId = req.user!.sub;
+    const user = await req.prisma.user.findUnique({
       where: { id: userId },
       include: { customer_profile: true, seller_profile: true }
     });
@@ -24,12 +23,12 @@ export const getMyProfile = async (req: Request, res: Response): Promise<void> =
 
 export const updateMyProfile = async (req: Request, res: Response): Promise<void> => {
   try {
-    const userId = req.user.sub;
-    const role = req.user.role;
+    const userId = req.user!.sub;
+    const role = req.user!.role;
     const { cbu_alias } = req.body;
 
     if (role === 'SELLER') {
-      const updatedProfile = await prisma.sellerProfile.update({
+      const updatedProfile = await req.prisma.sellerProfile.update({
         where: { user_id: userId },
         data: { cbu_alias }
       });
@@ -46,7 +45,7 @@ export const updateMyProfile = async (req: Request, res: Response): Promise<void
 
 export const changeMyPassword = async (req: Request, res: Response): Promise<void> => {
   try {
-    const userId = req.user.sub;
+    const userId = req.user!.sub;
     const { current_password, new_password } = req.body;
 
     if (!current_password || !new_password || new_password.length < 8) {
@@ -54,7 +53,7 @@ export const changeMyPassword = async (req: Request, res: Response): Promise<voi
       return;
     }
 
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const user = await req.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
       res.status(404).json({ error: 'Usuario no encontrado' });
       return;
@@ -67,7 +66,7 @@ export const changeMyPassword = async (req: Request, res: Response): Promise<voi
     }
 
     const newHash = await bcrypt.hash(new_password, 10);
-    await prisma.user.update({
+    await req.prisma.user.update({
       where: { id: userId },
       data: { password_hash: newHash }
     });

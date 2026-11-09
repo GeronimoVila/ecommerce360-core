@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
-import prisma from '../config/prisma';
+import { prismaGlobal } from '../config/prisma'; 
 import { RedisService } from '../redis/redis.service';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -15,23 +15,13 @@ export const createSeller = async (req: Request, res: Response): Promise<void> =
     
     const ref_code = `${first_name.toUpperCase().substring(0,4)}${last_name.toUpperCase().substring(0,1)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
 
-    const newSeller = await prisma.$transaction(async (tx) => {
+    const newSeller = await req.prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
-        data: {
-          email,
-          password_hash,
-          role: 'SELLER'
-        }
+        data: { email, password_hash, role: 'SELLER' }
       });
 
       const profile = await tx.sellerProfile.create({
-        data: {
-          user_id: user.id,
-          ref_code,
-          first_name,
-          last_name,
-          cbu_alias
-        }
+        data: { user_id: user.id, ref_code, first_name, last_name, cbu_alias }
       });
 
       return { user, profile };
@@ -58,7 +48,7 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
   const { email, first_name, last_name, phone, cbu_alias, is_active } = req.body;
 
   try {
-    const targetUser = await prisma.user.findUnique({ 
+    const targetUser = await req.prisma.user.findUnique({ 
       where: { id: targetId },
       include: { customer_profile: true, seller_profile: true } 
     });
@@ -73,7 +63,7 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
-    await prisma.$transaction(async (tx) => {
+    await req.prisma.$transaction(async (tx) => {
       const userUpdateData: any = {};
       if (email !== undefined) userUpdateData.email = email;
       if (is_active !== undefined) userUpdateData.is_active = is_active;
@@ -131,7 +121,7 @@ export const deactivateUser = async (req: Request, res: Response): Promise<void>
   const targetId = req.params.id as string;
 
   try {
-    const targetUser = await prisma.user.findUnique({ where: { id: targetId } });
+    const targetUser = await req.prisma.user.findUnique({ where: { id: targetId } });
 
     if (!targetUser) {
       res.status(404).json({ error: 'Usuario no encontrado' });
@@ -143,7 +133,7 @@ export const deactivateUser = async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    await prisma.user.update({
+    await req.prisma.user.update({
       where: { id: targetId },
       data: { is_active: false }
     });
@@ -170,7 +160,7 @@ export const validateSellerId = async (req: Request, res: Response): Promise<Res
       return res.status(200).json(cachedData);
     }
 
-    const seller = await prisma.user.findFirst({
+    const seller = await prismaGlobal.user.findFirst({
       where: {
         id: id,
         role: 'SELLER',
@@ -202,7 +192,7 @@ export const validateSellerId = async (req: Request, res: Response): Promise<Res
 
 export const getSellers = async (req: Request, res: Response): Promise<void> => {
   try {
-    const sellers = await prisma.user.findMany({
+    const sellers = await req.prisma.user.findMany({
       where: { role: 'SELLER' },
       select: {
         id: true,

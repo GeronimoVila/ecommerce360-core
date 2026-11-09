@@ -1,0 +1,14 @@
+info:
+  name: Historial de pago
+  type: http
+
+http:
+  method: GET
+  url: "{{base_url}}/api/v1/commissions/payouts"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

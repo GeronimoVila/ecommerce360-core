@@ -1,8 +1,8 @@
-import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import { connectDatabase } from './config/prisma';
 import authRoutes from './auth/auth.routes';
 import usersRoutes from './users/users.routes';
 import productsRoutes from './products/products.routes';
@@ -13,14 +13,11 @@ import suppliersRoutes from './suppliers/suppliers.routes';
 import { startMaturationCron } from './commissions/maturation.cron';
 import commissionsRoutes from './commissions/commissions.routes';
 
-const prisma = new PrismaClient();
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 
 const redis = new Redis(redisUrl, {
     retryStrategy(times) {
-        if (times > 2) {
-            return null;
-        }
+        if (times > 2) return null;
         return Math.min(times * 100, 2000);
     },
     maxRetriesPerRequest: 1
@@ -71,8 +68,7 @@ app.get('/health', (_req: Request, res: Response) => {
 
 async function bootstrap() {
     try {
-        await prisma.$connect();
-        console.log("✅ Conexión exitosa al SSOT (Neon Tech - PostgreSQL).");
+        await connectDatabase(); 
 
         try {
             const ping = await redis.ping();
@@ -87,9 +83,7 @@ async function bootstrap() {
         
         app.listen(port, () => {
             console.log(`🚀 API Gateway escuchando en el puerto ${port}`);
-            
             startMaturationCron(); 
-            console.log("⏳ Servicio de maduración de comisiones iniciado.");
         });
     } catch (error) {
         console.error("❌ Fallo crítico en infraestructura principal:", error);

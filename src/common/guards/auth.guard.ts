@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { RedisService } from '../../redis/redis.service';
+import { getPrismaContext } from '../../config/prisma';
 
 export const requireAuth = (allowedRoles: string[] = []) => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -18,7 +19,6 @@ export const requireAuth = (allowedRoles: string[] = []) => {
 
       const payload = jwt.verify(token, process.env.JWT_SECRET!) as any;
 
-
       const isTokenBanned = await RedisService.isTokenBanned(payload.jti);
       if (isTokenBanned) {
         res.status(401).json({ error: 'Sesión revocada. Vuelva a iniciar sesión.' });
@@ -27,7 +27,7 @@ export const requireAuth = (allowedRoles: string[] = []) => {
 
       const isUserBanned = await RedisService.isUserBanned(payload.sub);
       if (isUserBanned) {
-        res.status(403).json({ error: 'Tu cuenta ha sido suspendida o revocada administrativamente.' });
+        res.status(403).json({ error: 'Tu cuenta ha sido suspendida.' });
         return;
       }
 
@@ -37,6 +37,7 @@ export const requireAuth = (allowedRoles: string[] = []) => {
       }
 
       req.user = payload; 
+      req.prisma = getPrismaContext(req.user); 
       next();
     } catch (error) {
       res.status(401).json({ error: 'Token inválido o expirado.' });

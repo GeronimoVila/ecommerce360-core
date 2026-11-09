@@ -2,8 +2,8 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
-import prisma from '../config/prisma';
 import { RedisService } from '../redis/redis.service';
+import { prismaGlobal } from '../config/prisma';
 
 export const login = async (req: Request, res: Response): Promise<void> => {
   const { email, password } = req.body;
@@ -13,7 +13,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const user = await prisma.user.findUnique({ where: { email } });
+  const user = await prismaGlobal.user.findUnique({ where: { email } });
   if (!user || !user.is_active) {
     res.status(401).json({ error: 'Credenciales inválidas o cuenta inactiva' });
     return;
@@ -66,7 +66,7 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
   try {
     const password_hash = await bcrypt.hash(password, 10);
 
-    const newCustomer = await prisma.$transaction(async (tx) => {
+    const newCustomer = await prismaGlobal.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: {
           email,
@@ -102,7 +102,7 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
 };
 
 export const getSession = async (req: Request, res: Response): Promise<void> => {
-  const payload = (req as any).user; 
+  const payload = req.user; 
 
   if (!payload || !payload.sub) {
     res.status(401).json({ error: 'Sesión inválida' });

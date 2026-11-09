@@ -1,44 +1,59 @@
 import { Request, Response } from 'express';
-import { PrismaClient, CommissionStatus } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { CommissionStatus } from '@prisma/client';
 
 export const getAvailableCommissions = async (req: Request, res: Response): Promise<void> => {
   try {
-    const rawCommissions = await prisma.commissionLedger.findMany({
+    const aggregates = await req.prisma.commissionLedger.groupBy({
+      by: ['seller_id'],
       where: { status: CommissionStatus.AVAILABLE },
-      include: {
-        seller: {
-          select: {
-            first_name: true,
-            last_name: true,
-            cbu_alias: true
-          }
-        }
-      }
+      _sum: { amount: true },
+      _count: { id: true }
     });
 
-    const grouped = rawCommissions.reduce((acc: any, curr: any) => {
-      if (!acc[curr.seller_id]) {
-        acc[curr.seller_id] = { 
-          seller_id: curr.seller_id,
-          seller_name: curr.seller ? `${curr.seller.first_name} ${curr.seller.last_name}`.trim() : 'Vendedor Desconocido',
-          cbu_alias: curr.seller?.cbu_alias || 'No registrado',
-          total_amount: 0, 
-          count: 0, 
-          commission_ids: [] 
-        };
-      }
-      acc[curr.seller_id].total_amount += Number(curr.amount);
-      acc[curr.seller_id].count += 1;
-      acc[curr.seller_id].commission_ids.push(curr.id);
-      return acc;
-    }, {});
+    if (aggregates.length === 0) {
+      res.status(200).json({ data: [] });
+      return;
+    }
 
-    res.status(200).json({ data: Object.values(grouped) });
+    const sellerIds = aggregates.map(a => a.seller_id);
+
+    const [sellers, rawIds] = await Promise.all([
+      req.prisma.sellerProfile.findMany({
+        where: { user_id: { in: sellerIds } },
+        select: { user_id: true, first_name: true, last_name: true, cbu_alias: true }
+      }),
+      req.prisma.commissionLedger.findMany({
+        where: { status: CommissionStatus.AVAILABLE, seller_id: { in: sellerIds } },
+        select: { id: true, seller_id: true }
+      })
+    ]);
+
+    const sellerMap = new Map(sellers.map(s => [s.user_id, s]));
+    
+    const commissionIdsMap = new Map<string, string[]>();
+    rawIds.forEach(record => {
+      if (!commissionIdsMap.has(record.seller_id)) {
+        commissionIdsMap.set(record.seller_id, []);
+      }
+      commissionIdsMap.get(record.seller_id)!.push(record.id);
+    });
+
+    const formattedData = aggregates.map(agg => {
+      const seller = sellerMap.get(agg.seller_id);
+      return {
+        seller_id: agg.seller_id,
+        seller_name: seller ? `${seller.first_name} ${seller.last_name}`.trim() : 'Vendedor Desconocido',
+        cbu_alias: seller?.cbu_alias || 'No registrado',
+        total_amount: Number(agg._sum.amount || 0),
+        count: agg._count.id,
+        commission_ids: commissionIdsMap.get(agg.seller_id) || []
+      };
+    });
+
+    res.status(200).json({ data: formattedData });
   } catch (error) {
-    console.error('[Commissions] Error al obtener comisiones:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    console.error('[Commissions] Error al agrupar el ledger de comisiones:', error);
+    res.status(500).json({ error: 'Error interno procesando las métricas de liquidación' });
   }
 };
 
@@ -51,7 +66,7 @@ export const liquidateCommissions = async (req: Request, res: Response): Promise
   }
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await req.prisma.$transaction(async (tx) => {
       const commissions = await tx.commissionLedger.findMany({
         where: {
           id: { in: commission_ids },
@@ -101,7 +116,7 @@ export const liquidateCommissions = async (req: Request, res: Response): Promise
 
 export const getPayoutHistory = async (req: Request, res: Response): Promise<void> => {
   try {
-    const rawPayouts = await prisma.payout.findMany({
+    const rawPayouts = await req.prisma.payout.findMany({
       orderBy: { created_at: 'desc' },
       include: {
         seller: {

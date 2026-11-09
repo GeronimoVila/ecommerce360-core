@@ -1,5 +1,4 @@
 import { Request, Response } from 'express';
-import prisma from '../config/prisma';
 import { Prisma } from '@prisma/client';
 import { RedisService } from '../redis/redis.service';
 import { triggerB2CRevalidation } from '../utils/revalidate.util';
@@ -31,7 +30,7 @@ export const createPaymentRule = async (req: Request, res: Response): Promise<vo
       return;
     }
 
-    const newRule = await prisma.paymentRule.create({
+    const newRule = await req.prisma.paymentRule.create({
       data: {
         payment_method,
         installments: parseInt(installments, 10) || 1,
@@ -65,7 +64,7 @@ export const createPaymentRule = async (req: Request, res: Response): Promise<vo
 
 export const getPaymentRules = async (req: Request, res: Response): Promise<void> => {
   try {
-    const rules = await prisma.paymentRule.findMany({
+    const rules = await req.prisma.paymentRule.findMany({
       orderBy: { created_at: 'desc' },
       include: {
         category: { select: { name: true } },
@@ -99,7 +98,7 @@ export const updatePaymentRule = async (req: Request, res: Response): Promise<vo
       dataToUpdate.is_active = is_active;
     }
 
-    const updatedRule = await prisma.paymentRule.update({
+    const updatedRule = await req.prisma.paymentRule.update({
       where: { id },
       data: dataToUpdate
     });
@@ -124,7 +123,7 @@ export const softDeletePaymentRule = async (req: Request, res: Response): Promis
   try {
     const id = req.params.id as string;
 
-    const deletedRule = await prisma.paymentRule.update({
+    const deletedRule = await req.prisma.paymentRule.update({
       where: { id },
       data: { is_active: false }
     });

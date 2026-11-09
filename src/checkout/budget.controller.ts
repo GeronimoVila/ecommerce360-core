@@ -1,14 +1,12 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { prismaGlobal } from '../config/prisma';
 import { createMpPreference, getMpPaymentById } from './mercadopago.service';
-
-const prisma = new PrismaClient();
 
 const BUDGET_EXPIRATION_HOURS = 48;
 
 export const createBudget = async (req: Request, res: Response): Promise<Response | void> => {
     try {
-        const userId = (req as any).user?.sub; 
+        const userId = req.user?.sub; 
 
         if (!userId) {
             return res.status(401).json({ error: 'Token inválido o malformado: No se encontró el claim sub.' });
@@ -20,7 +18,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
             return res.status(400).json({ error: 'El presupuesto debe contener al menos un producto.' });
         }
 
-        const sellerProfile = await prisma.sellerProfile.findUnique({
+        const sellerProfile = await req.prisma.sellerProfile.findUnique({
             where: { user_id: userId }
         });
 
@@ -33,7 +31,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
         if (customerId && typeof customerId === 'string' && customerId.trim() !== '') {
             const cleanCustomerId = customerId.trim();
 
-            const customerProfile = await prisma.customerProfile.findFirst({
+            const customerProfile = await req.prisma.customerProfile.findFirst({
                 where: {
                     OR: [
                         { id: cleanCustomerId },
@@ -53,7 +51,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
         }
 
         const productIds = items.map((i: { productId: string }) => i.productId);
-        const dbProducts = await prisma.product.findMany({
+        const dbProducts = await req.prisma.product.findMany({
             where: { id: { in: productIds }, is_active: true }
         });
 
@@ -77,7 +75,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
             };
         });
 
-        const budgetOrder = await prisma.order.create({
+        const budgetOrder = await req.prisma.order.create({
             data: {
                 seller_id: sellerProfile.id,
                 customer_id: validCustomerId,
@@ -108,7 +106,7 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
     try {
         const id = req.params.id as string;
 
-        const order = await prisma.order.findUnique({
+        const order = await prismaGlobal.order.findUnique({
             where: { id: id },
             include: { items: { include: { product: true } } }
         });
@@ -146,7 +144,7 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
             checkoutUrl = mpResponse.sandboxInitPoint || mpResponse.initPoint || '';
             gatewayTxnId = mpResponse.preferenceId || '';
 
-            await prisma.order.update({
+            await prismaGlobal.order.update({
                 where: { id: order.id },
                 data: { 
                     status: 'PENDING',
@@ -170,7 +168,7 @@ export const getBudgetById = async (req: Request<{ id: string }>, res: Response)
     try {
         const id = req.params.id;
 
-        const order = await prisma.order.findUnique({
+        const order = await prismaGlobal.order.findUnique({
             where: { id: id },
             include: { 
                 items: { 
@@ -215,11 +213,9 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
         if (paymentData.status === 'approved') {
             const orderId = paymentData.external_reference;
 
-            if (!orderId) {
-                return res.status(200).send('Pago aprobado pero sin external_reference. Ignorando.');
-            }
+            if (!orderId) return res.status(200).send('Pago aprobado pero sin external_reference. Ignorando.');
 
-            await prisma.$transaction(async (tx) => {
+            await prismaGlobal.$transaction(async (tx) => {
                 const order = await tx.order.findUnique({
                     where: { id: orderId },
                     include: { items: { include: { product: true } } }
@@ -250,7 +246,6 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
 
                 if (order.seller_id && totalCommission > 0) {
                     if (order.seller_id !== order.customer_id) {
-                        
                         const clearingDate = new Date();
                         clearingDate.setDate(clearingDate.getDate() + 15);
 

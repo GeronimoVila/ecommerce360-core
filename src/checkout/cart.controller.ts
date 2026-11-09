@@ -1,7 +1,5 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { prismaGlobal } from '../config/prisma'; 
 
 export const syncCart = async (req: Request, res: Response): Promise<Response | void> => {
     try {
@@ -12,7 +10,7 @@ export const syncCart = async (req: Request, res: Response): Promise<Response | 
 
         const productIds = items.map(i => i.productId);
         
-        const dbProducts = await prisma.product.findMany({
+        const dbProducts = await prismaGlobal.product.findMany({
             where: { id: { in: productIds } },
             select: { id: true, name: true, base_price: true, physical_stock: true, is_active: true }
         });
@@ -75,7 +73,7 @@ export const validateCoupon = async (req: Request, res: Response): Promise<Respo
             return res.status(400).json({ error: 'Se requiere el código del cupón y el subtotal del carrito.' });
         }
 
-        const coupon = await prisma.coupon.findUnique({
+        const coupon = await prismaGlobal.coupon.findUnique({
             where: { code: code.toUpperCase() }
         });
 

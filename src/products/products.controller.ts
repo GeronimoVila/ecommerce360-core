@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import prisma from '../config/prisma';
+import { prismaGlobal } from '../config/prisma';
 import { Prisma } from '@prisma/client';
 import { RedisService } from '../redis/redis.service';
 import { PricingEngine } from './pricing.engine';
@@ -23,7 +23,7 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
     const costWithVat = cost * (1 + vat);
     const calculatedBasePrice = costWithVat * (1 + margin);
 
-    const newProduct = await prisma.product.create({
+    const newProduct = await req.prisma.product.create({
       data: {
         sku: sku.toUpperCase(),
         name,
@@ -55,7 +55,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
     const id = req.params.id as string; 
     const updateData = req.body;
 
-    const existingProduct = await prisma.product.findUnique({ where: { id } });
+    const existingProduct = await req.prisma.product.findUnique({ where: { id } });
     if (!existingProduct) {
       res.status(404).json({ error: 'Producto no encontrado' });
       return;
@@ -78,7 +78,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
     if (updateData.commission_rate) dataToUpdate.commission_rate = new Prisma.Decimal(updateData.commission_rate);
     if (updateData.physical_stock !== undefined) dataToUpdate.physical_stock = parseInt(updateData.physical_stock, 10);
 
-    const updatedProduct = await prisma.product.update({
+    const updatedProduct = await req.prisma.product.update({
       where: { id },
       data: dataToUpdate
     });
@@ -98,7 +98,7 @@ export const deactivateProduct = async (req: Request, res: Response): Promise<vo
   try {
     const id = req.params.id as string;
 
-    const deactivatedProduct = await prisma.product.update({
+    const deactivatedProduct = await req.prisma.product.update({
       where: { id },
       data: { is_active: false }
     });
@@ -124,7 +124,7 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
     const userRole = (req as any).user?.role;
     const whereClause = userRole === 'ADMIN' ? {} : { is_active: true };
 
-    const products = await prisma.product.findMany({
+    const products = await req.prisma.product.findMany({
       where: whereClause,
       skip,
       take: limit,
@@ -160,7 +160,7 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
 
     const finalProducts = PricingEngine.applyDynamicPricing(hydratedProducts, activeRules);
 
-    const total = await prisma.product.count({ where: whereClause });
+    const total = await req.prisma.product.count({ where: whereClause });
 
     res.status(200).json({
       data: finalProducts,
@@ -189,7 +189,7 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
       whereClause.is_active = true;
     }
 
-    const product = await prisma.product.findFirst({
+    const product = await req.prisma.product.findFirst({
       where: whereClause,
       include: {
         combo_parts: {
@@ -237,7 +237,7 @@ export const reactivateProduct = async (req: Request, res: Response): Promise<vo
   try {
     const id = req.params.id as string;
 
-    const reactivatedProduct = await prisma.product.update({
+    const reactivatedProduct = await req.prisma.product.update({
       where: { id },
       data: { is_active: true }
     });
@@ -272,7 +272,7 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
 
     const partSkus = parts.map((p: { sku: string; quantity: number }) => p.sku);
 
-    const dbParts = await prisma.product.findMany({
+    const dbParts = await req.prisma.product.findMany({
       where: { 
         sku: { in: partSkus },
         is_active: true
@@ -318,7 +318,7 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
 
     const calculatedInitialStock = minVirtualStock === Infinity ? 0 : minVirtualStock;
 
-    const newCombo = await prisma.$transaction(async (tx) => {
+    const newCombo = await req.prisma.$transaction(async (tx) => {
       return await tx.product.create({
         data: {
           sku: sku.toUpperCase(),
@@ -385,7 +385,7 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    const existingCombo = await prisma.product.findUnique({
+    const existingCombo = await req.prisma.product.findUnique({
       where: { id: comboId },
       include: { combo_parts: true }
     });
@@ -396,7 +396,7 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
     }
 
     const partSkus = parts.map((p: { sku: string; quantity: number }) => p.sku);
-    const dbParts = await prisma.product.findMany({
+    const dbParts = await req.prisma.product.findMany({
       where: { 
         sku: { in: partSkus },
         is_active: true
@@ -435,7 +435,7 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
 
     const calculatedVirtualStock = minVirtualStock === Infinity ? 0 : minVirtualStock;
 
-    const updatedCombo = await prisma.$transaction(async (tx) => {
+    const updatedCombo = await req.prisma.$transaction(async (tx) => {
       await tx.comboItem.deleteMany({
         where: { combo_id: comboId }
       });
@@ -496,7 +496,7 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
     if (type === 'simple') whereClause.is_combo = false;
     if (type === 'combo') whereClause.is_combo = true;
 
-    const products = await prisma.product.findMany({
+    const products = await req.prisma.product.findMany({
       skip,
       take: limit,
       where: whereClause,
@@ -544,7 +544,7 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
       return simpleProduct;
     });
 
-    const total = await prisma.product.count({ where: whereClause });
+    const total = await req.prisma.product.count({ where: whereClause });
 
     res.status(200).json({
       data: hydratedProducts,
@@ -564,7 +564,7 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
 
     const whereClause: Prisma.ProductWhereInput = { is_active: true };
 
-    const products = await prisma.product.findMany({
+    const products = await prismaGlobal.product.findMany({
       where: whereClause,
       skip,
       take: limit,
@@ -576,6 +576,17 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
         physical_stock: true,
         is_combo: true,
         category_id: true,
+        combo_parts: {
+          include: {
+            product: {
+              select: { 
+                sku: true, 
+                name: true, 
+                physical_stock: true 
+              }
+            }
+          }
+        }
       }
     });
 
@@ -585,8 +596,14 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
       : {};
 
     const hydratedProducts = products.map(product => {
+      const parts = product.combo_parts || []; 
+      
       if (product.is_combo) {
-        return { ...product, physical_stock: comboStocks[product.id] ?? 0 };
+        return { 
+          ...product, 
+          combo_parts: parts,
+          physical_stock: comboStocks[product.id] ?? 0 
+        };
       }
       return product;
     });
@@ -596,7 +613,7 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
     const activeRules = await RedisService.getActivePaymentRules();
     const finalProducts = PricingEngine.applyDynamicPricing(availableProducts, activeRules);
 
-    const total = await prisma.product.count({ where: whereClause });
+    const total = await prismaGlobal.product.count({ where: whereClause });
 
     res.status(200).json({
       data: finalProducts,
@@ -618,7 +635,7 @@ export const getStorefrontProductById = async (req: Request, res: Response): Pro
       return;
     }
 
-    const product = await prisma.product.findFirst({
+    const product = await req.prisma.product.findFirst({
       where: { id, is_active: true },
       select: {
         id: true,

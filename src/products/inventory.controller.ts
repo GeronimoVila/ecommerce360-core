@@ -1,5 +1,4 @@
 import { Request, Response } from 'express';
-import prisma from '../config/prisma';
 import { RedisService } from '../redis/redis.service';
 import { triggerB2CRevalidation } from '../utils/revalidate.util';
 
@@ -34,7 +33,7 @@ export const processRestock = async (req: Request, res: Response): Promise<void>
     }
 
     const skus = items.map(item => item.sku.toUpperCase());
-    const existingProducts = await prisma.product.findMany({
+    const existingProducts = await req.prisma.product.findMany({
       where: { sku: { in: skus } },
       select: { id: true, sku: true, is_combo: true }
     });
@@ -57,7 +56,7 @@ export const processRestock = async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    const { updatedParts, purchaseRecord } = await prisma.$transaction(async (tx) => {
+    const { updatedParts, purchaseRecord } = await req.prisma.$transaction(async (tx) => {
       
       let supplierId = null;
       if (provider_name) {
@@ -113,7 +112,7 @@ export const processRestock = async (req: Request, res: Response): Promise<void>
     }
 
     for (const comboId of affectedComboIds) {
-      const comboRecipe = await prisma.product.findUnique({
+      const comboRecipe = await req.prisma.product.findUnique({
         where: { id: comboId },
         select: {
           combo_parts: {
@@ -158,7 +157,7 @@ export const getSupplierPurchases = async (req: Request, res: Response): Promise
     const limit = parseInt(req.query.limit as string) || 20;
     const skip = (page - 1) * limit;
 
-    const purchases = await prisma.supplierPurchase.findMany({
+    const purchases = await req.prisma.supplierPurchase.findMany({
       orderBy: { created_at: 'desc' },
       skip,
       take: limit,
@@ -173,7 +172,7 @@ export const getSupplierPurchases = async (req: Request, res: Response): Promise
       }
     });
 
-    const total = await prisma.supplierPurchase.count();
+    const total = await req.prisma.supplierPurchase.count();
 
     const formattedPurchases = purchases.map(purchase => ({
       id: purchase.id,
@@ -217,7 +216,7 @@ export const updateSupplierPurchaseMetadata = async (req: Request, res: Response
       return;
     }
 
-    const updatedPurchase = await prisma.supplierPurchase.update({
+    const updatedPurchase = await req.prisma.supplierPurchase.update({
       where: { id },
       data: {
         ...(provider_name !== undefined && { provider_name }),

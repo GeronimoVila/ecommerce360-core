@@ -1,9 +1,7 @@
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { prismaGlobal } from '../config/prisma';
 import { MercadoPagoConfig, Payment } from 'mercadopago';
 import { createMpPreference } from './mercadopago.service';
-
-const prisma = new PrismaClient();
 
 const mpClient = new MercadoPagoConfig({ 
     accessToken: process.env.MP_ACCESS_TOKEN || '', 
@@ -22,7 +20,7 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
         let validSellerId: string | null = null;
 
         if (sellerIdCookie) {
-            const activeSeller = await prisma.sellerProfile.findFirst({
+            const activeSeller = await prismaGlobal.sellerProfile.findFirst({
                 where: {
                     OR: [
                         { id: sellerIdCookie },
@@ -44,7 +42,7 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
         }
 
         const productIds = items.map((i: { productId: string }) => i.productId);
-        const dbProducts = await prisma.product.findMany({
+        const dbProducts = await prismaGlobal.product.findMany({
             where: { 
                 id: { in: productIds },
                 is_active: true 
@@ -72,7 +70,7 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             };
         });
 
-        const draftOrder = await prisma.$transaction(async (tx) => {
+        const draftOrder = await prismaGlobal.$transaction(async (tx) => {
             return await tx.order.create({
                 data: {
                     customer_id: customerId || null,
@@ -106,7 +104,7 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             checkoutUrl = mpResponse.sandboxInitPoint || mpResponse.initPoint || '';
             gatewayTxnId = mpResponse.preferenceId || '';
 
-            await prisma.order.update({
+            await prismaGlobal.order.update({
                 where: { id: draftOrder.id },
                 data: { gateway_txn_id: gatewayTxnId }
             });
@@ -145,88 +143,105 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
     }
 
     try {
+        let orderId: string | undefined;
+
         const paymentInfo = await new Payment(mpClient).get({ id: Number(paymentId) });
-
+        
         if (paymentInfo.status === 'approved') {
-            const orderId = paymentInfo.external_reference;
+            orderId = paymentInfo.external_reference;
+        }
 
-            if (!orderId) {
-                console.warn(`[Webhook MP] Pago ${paymentId} sin external_reference (Order ID missing).`);
-                return res.status(200).send('OK');
+        if (!orderId) {
+            console.warn(`[Webhook MP] Pago ${paymentId} sin orden asociada.`);
+            return res.status(200).send('OK');
+        }
+
+        const order = await prismaGlobal.order.findUnique({
+            where: { id: orderId },
+            include: { 
+                items: { 
+                    include: { product: true } 
+                } 
             }
+        });
 
-            const order = await prisma.order.findUnique({
-                where: { id: orderId },
-                include: { 
-                    items: { 
-                        include: { product: true } 
-                    } 
-                }
+        if (!order) {
+            console.error(`[Webhook MP] Orden ${orderId} no encontrada en PostgreSQL.`);
+            return res.status(200).send('Orden no encontrada');
+        }
+
+        if (order.status === 'PAID') {
+            return res.status(200).send('Orden ya procesada');
+        }
+
+        await prismaGlobal.$transaction(async (tx) => {
+            const updatedOrder = await tx.order.updateMany({
+                where: { id: orderId, status: 'PENDING' },
+                data: { status: 'PAID' }
             });
 
-            if (!order) {
-                console.error(`[Webhook MP] Orden ${orderId} no encontrada en PostgreSQL.`);
-                return res.status(200).send('Orden no encontrada');
+            if (updatedOrder.count === 0) {
+                throw new Error('La orden ya fue procesada previamente.');
             }
 
-            if (order.status === 'PAID') {
-                console.log(`[Webhook MP] Orden ${orderId} ya procesada previamente (Idempotencia activa).`);
-                return res.status(200).send('Orden ya procesada');
-            }
+            let totalCommissionAmount = 0;
 
-            await prisma.$transaction(async (tx) => {
-                await tx.order.update({
-                    where: { id: orderId },
-                    data: { status: 'PAID' }
+            for (const item of order.items) {
+                if (!item.product_id || !item.product) continue;
+
+                const updateResult = await tx.product.updateMany({
+                    where: {
+                        id: item.product_id,
+                        physical_stock: { gte: item.quantity },
+                    },
+                    data: {
+                        physical_stock: { decrement: item.quantity },
+                        version: { increment: 1 }
+                    }
                 });
 
-                let totalCommissionAmount = 0;
+                if (updateResult.count === 0) {
+                    throw new Error(`Stock insuficiente para el producto ${item.product.name}. Sobreventa abortada.`);
+                }
 
-                for (const item of order.items) {
-                    if (!item.product_id || !item.product) {
-                        console.warn(`[Inventario] El item de la orden ${orderId} no tiene producto asociado.`);
-                        continue;
+                const itemTotal = Number(item.unit_price) * item.quantity;
+                const commissionRate = Number(item.product.commission_rate) / 100;
+                totalCommissionAmount += (itemTotal * commissionRate);
+            }
+
+            if (order.seller_id && totalCommissionAmount > 0) {
+                const sanitizedCommission = Math.round(totalCommissionAmount * 100) / 100;
+                const clearingDate = new Date();
+                clearingDate.setDate(clearingDate.getDate() + 15);
+
+                await tx.commissionLedger.create({
+                    data: {
+                        order_id: orderId,
+                        seller_id: order.seller_id,
+                        amount: sanitizedCommission,
+                        status: 'PENDING_CLEARANCE',
+                        clearing_date: clearingDate
                     }
-
-                    await tx.product.update({
-                        where: { id: item.product_id },
-                        data: {
-                            physical_stock: { decrement: item.quantity }
-                        }
-                    });
-
-                    const itemTotal = Number(item.unit_price) * item.quantity;
-                    const commissionRate = Number(item.product.commission_rate) / 100;
-                    totalCommissionAmount += (itemTotal * commissionRate);
-                }
-
-                if (order.seller_id && totalCommissionAmount > 0) {
-                    const sanitizedCommission = Math.round(totalCommissionAmount * 100) / 100;
-                    
-                    const clearingDate = new Date();
-                    clearingDate.setDate(clearingDate.getDate() + 15);
-
-                    await tx.commissionLedger.create({
-                        data: {
-                            order_id: orderId,
-                            seller_id: order.seller_id,
-                            amount: sanitizedCommission,
-                            status: 'PENDING_CLEARANCE',
-                            clearing_date: clearingDate
-                        }
-                    });
-
-                    console.log(`[FINANZAS - Ledger] Comisión de $${sanitizedCommission} congelada (PENDING) para el Vendedor ${order.seller_id}. Fecha de liberación: ${clearingDate.toISOString()}`);
-                }
-            });
-
-            console.log(`✅ [FINANZAS & INVENTARIO] Orden ${orderId} confirmada como PAID. Stock actualizado.`);
-        }
+                });
+            }
+        });
 
         return res.status(200).send('Webhook procesado exitosamente');
 
-    } catch (error) {
-        console.error('[Webhook MP] Error crítico procesando la notificación:', error);
+    } catch (error: any) {
+        const knownGuards = [
+            'La orden ya fue procesada previamente.',
+            'Stock insuficiente'
+        ];
+        
+        const isSecurityBlock = knownGuards.some(msg => error.message?.includes(msg));
+
+        if (isSecurityBlock) {
+            console.warn(`🛡️ [Webhook MP - Idempotencia] Bloqueo preventivo exitoso: ${error.message}`);
+            return res.status(200).send('Procesado/Ignorado por seguridad');
+        }
+
+        console.error('❌ [Webhook MP] Error crítico procesando la notificación:', error.message);
         return res.status(500).send('Internal Server Error');
     }
 };
