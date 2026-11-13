@@ -9,6 +9,18 @@ const CACHE_KEYS = {
 
 export const RedisService = {
 
+  async get(key: string): Promise<string | null> {
+    return await redisClient.get(key);
+  },
+
+  async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
+    if (ttlSeconds) {
+      await redisClient.set(key, value, 'EX', ttlSeconds);
+    } else {
+      await redisClient.set(key, value);
+    }
+  },
+
   /**
    * Adquiere un bloqueo distribuido.
    * Vital para prevenir Race Conditions en cronjobs o doble procesamiento de pagos.
