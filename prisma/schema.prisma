@@ -313,3 +313,20 @@ model Coupon {
   @@index([code])
   @@map("coupons")
 }
+
+model PaymentGatewayConfig {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId             String    @default("DEFAULT_STORE") @map("tenant_id") @db.VarChar(64)
+  provider             String    @db.VarChar(20)
+  connectId            String?   @map("connect_id") @db.VarChar(120)
+  accessTokenEncrypted String?   @map("access_token_encrypted")
+  merchantCuit         String?   @map("merchant_cuit") @db.VarChar(20)
+  merchantName         String?   @map("merchant_name") @db.VarChar(150)
+  isTestMode           Boolean   @default(true) @map("is_test_mode")
+  status               String    @default("DISCONNECTED") @db.VarChar(20)
+  connectedAt          DateTime? @map("connected_at") @db.Timestamptz()
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
+
+  @@unique([tenantId, provider])
+  @@map("payment_gateway_configs")
+}

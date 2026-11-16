@@ -1,0 +1,34 @@
+info:
+  name: Crear Checkout
+  type: http
+
+http:
+  method: POST
+  url: "{{base_url}}/api/mobbex/checkout"
+  body:
+    type: json
+    data: |-
+      {
+        "orderId": "ORD-TEST-001",
+        "total": 15500.50,
+        "customer": {
+          "email": "comprador.prueba@ecommerce360.com",
+          "name": "Juan Perez",
+          "dni": "35123456"
+        },
+        "items": [
+          {
+            "image": "https://via.placeholder.com/150",
+            "quantity": 1,
+            "description": "Kit Encendido Completo",
+            "total": 15500.50
+          }
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

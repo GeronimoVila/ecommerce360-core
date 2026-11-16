@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { prismaGlobal } from '../config/prisma';
 import { MercadoPagoConfig, Payment } from 'mercadopago';
 import { createMpPreference } from './mercadopago.service';
+import { generateMobbexSessionForOrder } from '../mobbex/mobbex.controller';
 
 const mpClient = new MercadoPagoConfig({ 
     accessToken: process.env.MP_ACCESS_TOKEN || '', 
@@ -109,7 +110,9 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 data: { gateway_txn_id: gatewayTxnId }
             });
         } else if (paymentMethod === 'MOBBEX') {
-            throw new Error("Mobbex no implementado aún");
+            const mobbexSession = await generateMobbexSessionForOrder(draftOrder.id);
+            checkoutUrl = mobbexSession.checkoutUrl;
+            gatewayTxnId = mobbexSession.checkoutId;
         }
 
         return res.status(201).json({

@@ -1,6 +1,7 @@
 info:
   name: Compra asistida
   type: http
+  seq: 1
 
 http:
   method: POST
@@ -14,11 +15,11 @@ http:
       {
         "items": [
           {
-            "productId": "a9b60c10-3f08-4904-a0a7-097354d04b5c",
-            "quantity": 1
+            "productId": "9493b0a1-4a72-4aa4-b9b0-be6cfb6cb3f6",
+            "quantity": 2
           }
         ],
-        "paymentMethod": "MP"
+        "paymentMethod": "MOBBEX"
       }
   auth: inherit
 

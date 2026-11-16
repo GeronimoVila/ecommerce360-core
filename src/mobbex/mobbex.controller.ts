@@ -1,0 +1,642 @@
+import { Request, Response } from 'express';
+import { CommissionStatus } from '@prisma/client';
+import prisma from '../config/prisma';
+import { RedisService } from '../redis/redis.service';
+import { resolveMobbexCredentials, encryptToken } from './mobbexAuth.service';
+
+const DEFAULT_TENANT = 'DEFAULT_STORE';
+
+export const getMobbexStatus = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const config = await prisma.paymentGatewayConfig.findUnique({
+      where: { tenantId_provider: { tenantId: DEFAULT_TENANT, provider: 'MOBBEX' } },
+      select: {
+        status: true,
+        merchantCuit: true,
+        merchantName: true,
+        isTestMode: true,
+        connectedAt: true,
+      },
+    });
+
+    if (!config || config.status !== 'CONNECTED') {
+      res.json({
+        status: config?.status || 'DISCONNECTED',
+        mode: 'DEMO_SANDBOX',
+        merchant: null,
+      });
+      return;
+    }
+
+    res.json({
+      status: config.status,
+      mode: config.isTestMode ? 'CLIENT_SANDBOX' : 'PRODUCTION',
+      merchant: {
+        name: config.merchantName,
+        cuit: config.merchantCuit,
+        connectedAt: config.connectedAt,
+      },
+    });
+  } catch (error) {
+    console.error('[Mobbex Status Error]:', error);
+    res.status(500).json({ error: 'Error al consultar el estado de Mobbex' });
+  }
+};
+
+export const initMobbexConnect = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const returnUrl = `${process.env.WEBHOOK_URL}/api/mobbex/oauth-bridge`;
+
+    const response = await fetch('https://api.mobbex.com/p/developer/connect', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.MOBBEX_APP_API_KEY!,
+      },
+      body: JSON.stringify({ return_url: returnUrl }),
+    });
+
+    const data = await response.json();
+
+    if (!data.result || !data.data?.url) {
+      res.status(400).json({ error: 'Mobbex rechazó la solicitud Dev Connect', details: data });
+      return;
+    }
+
+    await prisma.paymentGatewayConfig.upsert({
+      where: { tenantId_provider: { tenantId: DEFAULT_TENANT, provider: 'MOBBEX' } },
+      update: { connectId: data.data.id, status: 'PENDING' },
+      create: {
+        tenantId: DEFAULT_TENANT,
+        provider: 'MOBBEX',
+        connectId: data.data.id,
+        status: 'PENDING',
+      },
+    });
+
+    res.json({ connectUrl: data.data.url, connectId: data.data.id });
+  } catch (error) {
+    console.error('[Mobbex Connect Error]:', error);
+    res.status(500).json({ error: 'Error interno al iniciar vinculación con Mobbex' });
+  }
+};
+
+export const mobbexOAuthBridge = (req: Request, res: Response): void => {
+  const { connectStatus } = req.query;
+  const status = typeof connectStatus === 'string' ? connectStatus : 'cancelled';
+  res.redirect(`${process.env.FRONTEND_B2B_URL}/settings/payments?mobbexStatus=${status}`);
+};
+
+export const finalizeMobbexConnect = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const config = await prisma.paymentGatewayConfig.findUnique({
+      where: { tenantId_provider: { tenantId: DEFAULT_TENANT, provider: 'MOBBEX' } },
+    });
+
+    if (!config?.connectId) {
+      res.status(404).json({ error: 'No existe una solicitud de conexión pendiente' });
+      return;
+    }
+
+    const response = await fetch(
+      `https://api.mobbex.com/p/developer/connect/${config.connectId}/credentials`,
+      {
+        method: 'GET',
+        headers: { 'x-api-key': process.env.MOBBEX_APP_API_KEY! },
+      }
+    );
+
+    const cred = await response.json();
+
+    if (!cred.result || !cred.data?.access_token) {
+      res.status(400).json({ error: 'Fallo al obtener credenciales del comercio', details: cred });
+      return;
+    }
+
+    await prisma.paymentGatewayConfig.update({
+      where: { id: config.id },
+      data: {
+        accessTokenEncrypted: encryptToken(cred.data.access_token),
+        merchantCuit: cred.data.entity?.tax_id || cred.data.entity?.identification || null,
+        merchantName: cred.data.entity?.name || null,
+        status: 'CONNECTED',
+        isTestMode: true,
+        connectedAt: new Date(),
+      },
+    });
+
+    res.json({
+      connected: true,
+      merchant: {
+        name: cred.data.entity?.name,
+        cuit: cred.data.entity?.tax_id,
+      },
+    });
+  } catch (error) {
+    console.error('[Mobbex Finalize Error]:', error);
+    res.status(500).json({ error: 'Error al finalizar vinculación con Mobbex' });
+  }
+};
+
+export const toggleMobbexMode = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { isTestMode } = req.body;
+
+    if (typeof isTestMode !== 'boolean') {
+      res.status(400).json({ error: 'El campo isTestMode debe ser un valor booleano (true | false).' });
+      return;
+    }
+
+    const config = await prisma.paymentGatewayConfig.findUnique({
+      where: { tenantId_provider: { tenantId: DEFAULT_TENANT, provider: 'MOBBEX' } },
+    });
+
+    if (!config || config.status !== 'CONNECTED' || !config.accessTokenEncrypted) {
+      res.status(409).json({
+        error: 'No se puede activar modo Producción sin vincular primero la cuenta comercial de Mobbex.',
+        currentStatus: config?.status || 'DISCONNECTED',
+      });
+      return;
+    }
+
+    const updated = await prisma.paymentGatewayConfig.update({
+      where: { id: config.id },
+      data: { isTestMode },
+    });
+
+    res.json({
+      success: true,
+      status: updated.status,
+      isTestMode: updated.isTestMode,
+      mode: updated.isTestMode ? 'CLIENT_SANDBOX' : 'PRODUCTION',
+      merchant: {
+        name: updated.merchantName,
+        cuit: updated.merchantCuit,
+      },
+    });
+  } catch (error) {
+    console.error('[Mobbex Toggle Mode Error]:', error);
+    res.status(500).json({ error: 'Error al cambiar el entorno de operación de Mobbex.' });
+  }
+};
+
+export async function generateMobbexSessionForOrder(orderId: string) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      items: { include: { product: true } },
+      customer: { include: { user: true } },
+    },
+  });
+
+  if (!order) {
+    throw new Error('ORDEN_NO_ENCONTRADA');
+  }
+
+  if (order.status === 'PAID' || order.status === 'SHIPPED' || order.status === 'DELIVERED') {
+    throw new Error('ORDEN_YA_PAGADA');
+  }
+
+  const auth = await resolveMobbexCredentials(DEFAULT_TENANT);
+  const reference = auth.isDemoFallback ? `E360_DEV_${order.id}_${Date.now()}` : order.id;
+  const orderTotal = Number(order.total_amount);
+
+  const mobbexItems = order.items.map((item) => ({
+    image: 'https://via.placeholder.com/150',
+    quantity: item.quantity,
+    description: item.product ? `${item.product.name} (${item.product.sku})` : 'Producto Ecommerce 360',
+    total: Number(item.unit_price) * item.quantity,
+  }));
+
+  const customerEmail = order.customer?.user?.email || 'cliente@ecommerce360.com';
+  const customerFullName =
+    [order.customer?.first_name, order.customer?.last_name].filter(Boolean).join(' ') || 'Cliente Ecommerce 360';
+
+  const response = await fetch('https://api.mobbex.com/p/checkout', {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'Ecommerce360-Backend/1.0 (Node.js)',
+      'x-api-key': auth.apiKey,
+      'x-access-token': auth.accessToken,
+    },
+    body: JSON.stringify({
+      total: orderTotal,
+      currency: 'ARS',
+      reference,
+      description: `Orden #${order.id.slice(0, 8).toUpperCase()} - Ecommerce 360`,
+      test: auth.isTest,
+      timeout: 15,
+      return_url: `${process.env.WEBHOOK_URL}/api/mobbex/checkout-bridge?orderId=${order.id}`,
+      webhook: `${process.env.WEBHOOK_URL}/api/mobbex/webhook?options=final&internalOrderId=${order.id}`,
+      customer: {
+        email: customerEmail,
+        name: customerFullName,
+        identification: '11111111',
+      },
+      items: mobbexItems,
+    }),
+  });
+
+  const rawBody = await response.text();
+  let payload: any = null;
+  try {
+    payload = rawBody ? JSON.parse(rawBody) : null;
+  } catch {
+    payload = { rawText: rawBody };
+  }
+
+  if (!response.ok || !payload?.result || !payload?.data?.url) {
+    if (auth.isDemoFallback && (response.status === 401 || response.status === 403)) {
+      const mockId = `MOCK_CHK_${Date.now()}`;
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { gateway_txn_id: mockId, payment_method: 'MOBBEX' },
+      });
+      return {
+        checkoutUrl: `${process.env.WEBHOOK_URL}/api/mobbex/mock-gateway?orderId=${order.id}&total=${orderTotal}`,
+        checkoutId: mockId,
+        orderId: order.id,
+        amountCharged: orderTotal,
+        isTestMode: true,
+        isSimulated: true,
+      };
+    }
+
+    const err: any = new Error('MOBBEX_API_REJECTED');
+    err.status = response.status;
+    err.details = payload;
+    throw err;
+  }
+
+  await prisma.order.update({
+    where: { id: order.id },
+    data: {
+      gateway_txn_id: payload.data.id,
+      payment_method: 'MOBBEX',
+    },
+  });
+
+  return {
+    checkoutUrl: payload.data.url,
+    checkoutId: payload.data.id,
+    orderId: order.id,
+    amountCharged: orderTotal,
+    isTestMode: auth.isTest,
+  };
+}
+
+export const createMobbexCheckout = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { orderId } = req.body;
+    const authenticatedUserId = (req as any).user?.id;
+
+    if (!orderId) {
+      res.status(400).json({ error: 'El campo orderId es obligatorio' });
+      return;
+    }
+
+    const orderOwnerCheck = await prisma.order.findUnique({
+      where: { id: String(orderId) },
+      include: { customer: true },
+    });
+
+    if (!orderOwnerCheck) {
+      res.status(404).json({ error: 'Orden no encontrada en la base de datos' });
+      return;
+    }
+
+    if (
+      authenticatedUserId &&
+      orderOwnerCheck.customer?.user_id &&
+      orderOwnerCheck.customer.user_id !== authenticatedUserId
+    ) {
+      res.status(403).json({ error: 'No tienes autorización para pagar esta orden' });
+      return;
+    }
+
+    const session = await generateMobbexSessionForOrder(String(orderId));
+    res.json(session);
+  } catch (error: any) {
+    if (error.message === 'ORDEN_YA_PAGADA') {
+      res.status(400).json({ error: 'Esta orden ya se encuentra pagada' });
+      return;
+    }
+    if (error.message === 'MOBBEX_API_REJECTED') {
+      res.status(error.status >= 400 ? error.status : 400).json({
+        error: 'Mobbex rechazó la creación del checkout',
+        details: error.details,
+      });
+      return;
+    }
+    console.error('[Mobbex Checkout Error]:', error);
+    res.status(500).json({
+      error: 'Error interno al generar checkout de pago',
+      detail: process.env.NODE_ENV !== 'production' ? error?.message : undefined,
+    });
+  }
+};
+
+export const mobbexCheckoutBridge = (req: Request, res: Response): void => {
+  const { orderId, status } = req.query;
+  res.redirect(
+    `${process.env.FRONTEND_B2C_URL}/checkout/result?orderId=${orderId || ''}&status=${status || 'returned'}`
+  );
+};
+
+export const simulateMobbexGateway = async (req: Request, res: Response): Promise<void> => {
+  const { orderId, total, action = 'approve' } = req.query;
+  const statusCode = action === 'reject' ? '400' : '200';
+  const statusText = action === 'reject' ? 'Rechazada (Simulación)' : 'Aprobada (Simulación)';
+  const numericTotal = Number(total || 0);
+
+  await fetch(`${process.env.WEBHOOK_URL}/api/mobbex/webhook?options=final&internalOrderId=${orderId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'checkout',
+      data: {
+        payment: {
+          id: `SIM_TX_${Date.now()}`,
+          status: { code: statusCode, text: statusText, message: statusText },
+          requestedTotal: numericTotal,
+          total: numericTotal,
+        },
+      },
+    }),
+  });
+
+  res.redirect(`${process.env.FRONTEND_B2C_URL}/checkout/result?orderId=${orderId}&simulated=true`);
+};
+
+export const handleMobbexWebhook = async (req: Request, res: Response): Promise<void> => {
+  res.status(200).json({ received: true, gateway: 'MOBBEX' });
+
+  const { type, data } = req.body;
+  const internalOrderId = req.query.internalOrderId as string;
+
+  if (type !== 'checkout' || !data?.payment || !internalOrderId) return;
+
+  const transactionId = String(data.payment.id);
+  const webhookStatusCode = Number(data.payment.status.code);
+
+  const lockKey = `lock:mobbex:tx:${transactionId}`;
+  const processedKey = `idempotency:mobbex:tx:${transactionId}`;
+
+  const alreadyProcessed = await RedisService.get(processedKey);
+  if (alreadyProcessed) {
+    console.warn(`🛡️ [Webhook Mobbex - Redis Idempotency] Tx ya procesada -> ${transactionId}`);
+    return;
+  }
+
+  const acquired = await RedisService.acquireLock(lockKey, 60);
+  if (!acquired) {
+    console.warn(`🛡️ [Webhook Mobbex - Redis Lock] Concurrencia bloqueada -> Tx: ${transactionId}`);
+    return;
+  }
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: internalOrderId },
+      include: {
+        items: { include: { product: true } },
+        seller: { select: { user_id: true } },
+        customer: { select: { user_id: true } },
+      },
+    });
+
+    if (!order) {
+      console.error(`❌ [Webhook Mobbex] Orden ${internalOrderId} no encontrada en PostgreSQL.`);
+      return;
+    }
+
+    const auth = await resolveMobbexCredentials(DEFAULT_TENANT);
+    let verifiedStatusCode = webhookStatusCode;
+    let verifiedData = data;
+
+    const isLocalMockTx = transactionId.startsWith('SIM_TX_') || transactionId.startsWith('TX_');
+    const mustVerifyS2S = !auth.isDemoFallback || process.env.NODE_ENV === 'production' || !isLocalMockTx;
+
+    if (mustVerifyS2S) {
+      const verifyRes = await fetch(`https://api.mobbex.com/p/operations/${encodeURIComponent(transactionId)}`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Ecommerce360-Backend/1.0 (Node.js)',
+          'x-api-key': auth.apiKey,
+          'x-access-token': auth.accessToken,
+        },
+      });
+
+      const verifyPayload = await verifyRes.json().catch(() => null);
+
+      if (!verifyRes.ok || !verifyPayload?.result || !verifyPayload?.data) {
+        console.error(
+          `🚨 [Security Alert - Spoofing] Tx ${transactionId} inexistente o rechazada por API oficial Mobbex.`
+        );
+        return;
+      }
+
+      const officialOp = verifyPayload.data;
+      const paymentNode = officialOp.payment || officialOp;
+
+      verifiedStatusCode = Number(paymentNode.status?.code ?? officialOp.status?.code);
+      verifiedData = officialOp;
+
+      const officialRef = String(
+        officialOp.context?.reference ||
+          officialOp.context?.checkout?.reference ||
+          paymentNode.reference ||
+          officialOp.reference ||
+          ''
+      );
+
+      const officialCheckoutUid = String(
+        officialOp.checkout?.uid || officialOp.context?.checkout?.uid || ''
+      );
+
+      let isOwnerMatch =
+        (officialRef !== '' && officialRef.includes(internalOrderId)) ||
+        (officialCheckoutUid !== '' && officialCheckoutUid === order.gateway_txn_id);
+
+      if (!isOwnerMatch && order.gateway_txn_id?.startsWith('CHK:')) {
+        const chkRes = await fetch(
+          `https://api.mobbex.com/p/checkout/${encodeURIComponent(order.gateway_txn_id)}`,
+          {
+            method: 'GET',
+            headers: {
+              'Accept': 'application/json',
+              'x-api-key': auth.apiKey,
+              'x-access-token': auth.accessToken,
+            },
+          }
+        );
+        const chkPayload = await chkRes.json().catch(() => null);
+        const chkPayments: any[] = chkPayload?.data?.payments || [];
+        isOwnerMatch = chkPayments.some((p) => String(p.id) === transactionId);
+      }
+
+      if (!isOwnerMatch) {
+        console.error(
+          `🚨 [Security Alert - Replay] Tx ${transactionId} (ref: "${officialRef}", chk: "${officialCheckoutUid}") no pertenece a Orden ${internalOrderId}.`
+        );
+        return;
+      }
+
+      if (verifiedStatusCode === 200) {
+        const officialBaseAmount = Number(
+          paymentNode.requestedTotal ?? paymentNode.total ?? officialOp.requestedTotal ?? officialOp.total ?? 0
+        );
+        const expectedOrderAmount = Number(order.total_amount);
+
+        if (Math.abs(officialBaseAmount - expectedOrderAmount) > 1) {
+          console.error(
+            `🚨 [Security Alert - Amount Mismatch] Orden ${internalOrderId}: esperado $${expectedOrderAmount}, verificado en Mobbex $${officialBaseAmount}.`
+          );
+          return;
+        }
+      }
+    }
+
+    if (verifiedStatusCode === 200) {
+      if (order.status === 'PAID') {
+        console.warn(`🛡️ [Webhook Mobbex - DB Guard] Orden ${internalOrderId} ya estaba PAID. Ignorando.`);
+        await RedisService.set(processedKey, '1', 86400);
+        return;
+      }
+
+      await prisma.$transaction(async (tx) => {
+        const updatedOrder = await tx.order.updateMany({
+          where: {
+            id: internalOrderId,
+            status: { in: ['PENDING', 'BUDGET'] },
+          },
+          data: {
+            status: 'PAID',
+            gateway_txn_id: transactionId,
+            gateway_metadata: verifiedData,
+          },
+        });
+
+        if (updatedOrder.count === 0) {
+          throw new Error('La orden ya fue procesada previamente.');
+        }
+
+        let totalCommissionAmount = 0;
+
+        for (const item of order.items) {
+          if (!item.product_id || !item.product) continue;
+
+          const updateResult = await tx.product.updateMany({
+            where: {
+              id: item.product_id,
+              physical_stock: { gte: item.quantity },
+            },
+            data: {
+              physical_stock: { decrement: item.quantity },
+              version: { increment: 1 },
+            },
+          });
+
+          if (updateResult.count === 0) {
+            throw new Error(`Stock insuficiente para ${item.product.name}. Sobreventa abortada.`);
+          }
+
+          const itemTotal = Number(item.unit_price) * item.quantity;
+          const rate =
+            Number(item.applied_commission_rate) > 0
+              ? Number(item.applied_commission_rate)
+              : Number(item.product.commission_rate);
+          totalCommissionAmount += itemTotal * (rate / 100);
+        }
+
+        if (order.seller_id && totalCommissionAmount > 0) {
+          const isSelfPurchase =
+            order.seller?.user_id && order.customer?.user_id && order.seller.user_id === order.customer.user_id;
+
+          if (!isSelfPurchase) {
+            const sanitizedCommission = Math.round(totalCommissionAmount * 100) / 100;
+            const clearingDate = new Date();
+            clearingDate.setDate(clearingDate.getDate() + 15);
+
+            await tx.commissionLedger.create({
+              data: {
+                order_id: internalOrderId,
+                seller_id: order.seller_id,
+                amount: sanitizedCommission,
+                status: CommissionStatus.PENDING_CLEARANCE,
+                clearing_date: clearingDate,
+              },
+            });
+          } else {
+            console.warn(`🛡️ [Fraud Prevented] Auto-compra de vendedor bloqueada en Orden ${internalOrderId}.`);
+          }
+        }
+      });
+
+      await RedisService.set(processedKey, '1', 86400);
+      console.log(`✅ [Webhook Mobbex] Orden ${internalOrderId} PAID y verificada S2S (Tx: ${transactionId}).`);
+    }
+
+    else if (verifiedStatusCode >= 400 && verifiedStatusCode < 600) {
+      const reason =
+        verifiedData?.payment?.status?.message ||
+        verifiedData?.status?.message ||
+        data.payment.status.message ||
+        'Pago rechazado';
+
+      await prisma.order.update({
+        where: { id: internalOrderId },
+        data: {
+          gateway_metadata: {
+            lastFailureCode: verifiedStatusCode,
+            lastFailureReason: reason,
+            failedAt: new Date().toISOString(),
+          },
+        },
+      });
+      console.log(`⚠️ [Webhook Mobbex] Rechazo (${verifiedStatusCode}) registrado en Orden ${internalOrderId}: ${reason}`);
+    }
+
+    else if (verifiedStatusCode >= 600) {
+      await prisma.$transaction(async (tx) => {
+        await tx.commissionLedger.updateMany({
+          where: {
+            order_id: internalOrderId,
+            status: { in: [CommissionStatus.PENDING_CLEARANCE, CommissionStatus.AVAILABLE] },
+          },
+          data: { status: CommissionStatus.CANCELED },
+        });
+
+        if (order.status === 'PAID') {
+          for (const item of order.items) {
+            if (!item.product_id) continue;
+            await tx.product.update({
+              where: { id: item.product_id },
+              data: {
+                physical_stock: { increment: item.quantity },
+                version: { increment: 1 },
+              },
+            });
+          }
+
+          await tx.order.update({
+            where: { id: internalOrderId },
+            data: {
+              status: 'PENDING',
+              gateway_metadata: { refundedTx: transactionId, refundedAt: new Date().toISOString() },
+            },
+          });
+        }
+      });
+
+      await RedisService.set(processedKey, '1', 86400);
+      console.log(`🔄 [Webhook Mobbex] Devolución (${verifiedStatusCode}) verificada: stock reingresado y comisión CANCELED.`);
+    }
+  } catch (error: any) {
+    console.error(`❌ [Webhook Mobbex] Error procesando Orden ${internalOrderId}:`, error.message);
+  } finally {
+    await RedisService.releaseLock(lockKey);
+  }
+};
