@@ -3,18 +3,102 @@ import { prismaGlobal } from '../config/prisma';
 import { Prisma } from '@prisma/client';
 import { RedisService } from '../redis/redis.service';
 import { PricingEngine } from './pricing.engine';
+import { triggerB2CRevalidation } from '../utils/revalidate.util';
+
+const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+const CATEGORY_SELECT = {
+  id: true,
+  name: true,
+  slug: true,
+  path: true,
+  depth: true
+};
+
+async function validateLeafCategory(
+  prismaClient: any,
+  categoryId?: string
+): Promise<{ valid: boolean; error?: string }> {
+  if (!categoryId || typeof categoryId !== 'string') {
+    return { valid: false, error: 'El campo category_id es obligatorio para todos los productos y combos.' };
+  }
+
+  if (!UUID_REGEX.test(categoryId)) {
+    return { valid: false, error: 'El formato de category_id no es un UUID válido.' };
+  }
+
+  const category = await prismaClient.category.findUnique({
+    where: { id: categoryId },
+    include: { _count: { select: { children: true } } }
+  });
+
+  if (!category || !category.is_active) {
+    return { valid: false, error: 'La categoría seleccionada no existe o se encuentra inactiva.' };
+  }
+
+  if (category._count.children > 0) {
+    return {
+      valid: false,
+      error: `La categoría "${category.name}" contiene subcategorías. Debes asignar el producto a una subcategoría final.`
+    };
+  }
+
+  return { valid: true };
+}
+
+async function buildCategoryWhereFilter(
+  prismaClient: any,
+  categoryId?: string,
+  categorySlug?: string
+): Promise<Prisma.ProductWhereInput | null> {
+  if (!categoryId && !categorySlug) return null;
+
+  let targetCategory = null;
+
+  if (categoryId) {
+    if (!UUID_REGEX.test(categoryId)) {
+      return { id: '00000000-0000-0000-0000-000000000000' };
+    }
+    targetCategory = await prismaClient.category.findUnique({
+      where: { id: categoryId },
+      select: { path: true, is_active: true }
+    });
+  } else if (categorySlug) {
+    targetCategory = await prismaClient.category.findUnique({
+      where: { slug: categorySlug },
+      select: { path: true, is_active: true }
+    });
+  }
+
+  if (!targetCategory) {
+    return { id: '00000000-0000-0000-0000-000000000000' };
+  }
+
+  return {
+    category: {
+      path: { startsWith: targetCategory.path }
+    }
+  };
+}
 
 export const createProduct = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { 
-      sku, 
-      name, 
-      purchase_cost, 
-      vat_rate, 
-      profit_margin, 
-      physical_stock, 
-      commission_rate 
+    const {
+      sku,
+      name,
+      purchase_cost,
+      vat_rate,
+      profit_margin,
+      physical_stock,
+      commission_rate,
+      category_id
     } = req.body;
+
+    const categoryCheck = await validateLeafCategory(req.prisma, category_id);
+    if (!categoryCheck.valid) {
+      res.status(400).json({ error: categoryCheck.error });
+      return;
+    }
 
     const cost = parseFloat(purchase_cost);
     const vat = parseFloat(vat_rate) / 100;
@@ -32,28 +116,44 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
         profit_margin: new Prisma.Decimal(profit_margin),
         base_price: new Prisma.Decimal(calculatedBasePrice.toFixed(2)),
         physical_stock: parseInt(physical_stock, 10),
-        commission_rate: new Prisma.Decimal(commission_rate)
+        commission_rate: new Prisma.Decimal(commission_rate),
+        category_id
+      },
+      include: {
+        category: { select: CATEGORY_SELECT }
       }
     });
+
+    triggerB2CRevalidation('products');
 
     res.status(201).json({
       message: 'Producto creado exitosamente',
       product: newProduct
     });
-
   } catch (error: any) {
     if (error.code === 'P2002') {
       res.status(409).json({ error: 'El SKU ingresado ya existe en el catálogo.' });
       return;
     }
+    console.error('[ProductsController] Error en createProduct:', error);
     res.status(500).json({ error: 'Error interno al crear el producto' });
   }
 };
 
 export const updateProduct = async (req: Request, res: Response): Promise<void> => {
   try {
-    const id = req.params.id as string; 
-    const updateData = req.body;
+    const id = req.params.id as string;
+    const {
+      sku,
+      name,
+      purchase_cost,
+      vat_rate,
+      profit_margin,
+      physical_stock,
+      commission_rate,
+      category_id,
+      is_active
+    } = req.body;
 
     const existingProduct = await req.prisma.product.findUnique({ where: { id } });
     if (!existingProduct) {
@@ -61,36 +161,57 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    const dataToUpdate: any = { ...updateData };
+    const dataToUpdate: Prisma.ProductUpdateInput = {};
 
-    if (updateData.purchase_cost || updateData.vat_rate || updateData.profit_margin) {
-      const cost = parseFloat(updateData.purchase_cost ?? existingProduct.purchase_cost.toString());
-      const vat = parseFloat(updateData.vat_rate ?? existingProduct.vat_rate.toString()) / 100;
-      const margin = parseFloat(updateData.profit_margin ?? existingProduct.profit_margin.toString()) / 100;
+    if (sku !== undefined) dataToUpdate.sku = String(sku).toUpperCase();
+    if (name !== undefined) dataToUpdate.name = name;
+    if (is_active !== undefined) dataToUpdate.is_active = Boolean(is_active);
+
+    if (category_id !== undefined) {
+      const categoryCheck = await validateLeafCategory(req.prisma, category_id);
+      if (!categoryCheck.valid) {
+        res.status(400).json({ error: categoryCheck.error });
+        return;
+      }
+      dataToUpdate.category = { connect: { id: category_id } };
+    }
+
+    if (purchase_cost !== undefined || vat_rate !== undefined || profit_margin !== undefined) {
+      const cost = parseFloat(purchase_cost ?? existingProduct.purchase_cost.toString());
+      const vat = parseFloat(vat_rate ?? existingProduct.vat_rate.toString()) / 100;
+      const margin = parseFloat(profit_margin ?? existingProduct.profit_margin.toString()) / 100;
 
       const calculatedBasePrice = cost * (1 + vat) * (1 + margin);
       dataToUpdate.base_price = new Prisma.Decimal(calculatedBasePrice.toFixed(2));
     }
 
-    if (updateData.purchase_cost) dataToUpdate.purchase_cost = new Prisma.Decimal(updateData.purchase_cost);
-    if (updateData.vat_rate) dataToUpdate.vat_rate = new Prisma.Decimal(updateData.vat_rate);
-    if (updateData.profit_margin) dataToUpdate.profit_margin = new Prisma.Decimal(updateData.profit_margin);
-    if (updateData.commission_rate) dataToUpdate.commission_rate = new Prisma.Decimal(updateData.commission_rate);
-    if (updateData.physical_stock !== undefined) dataToUpdate.physical_stock = parseInt(updateData.physical_stock, 10);
+    if (purchase_cost !== undefined) dataToUpdate.purchase_cost = new Prisma.Decimal(purchase_cost);
+    if (vat_rate !== undefined) dataToUpdate.vat_rate = new Prisma.Decimal(vat_rate);
+    if (profit_margin !== undefined) dataToUpdate.profit_margin = new Prisma.Decimal(profit_margin);
+    if (commission_rate !== undefined) dataToUpdate.commission_rate = new Prisma.Decimal(commission_rate);
+    if (physical_stock !== undefined) dataToUpdate.physical_stock = parseInt(physical_stock, 10);
 
     const updatedProduct = await req.prisma.product.update({
       where: { id },
-      data: dataToUpdate
+      data: dataToUpdate,
+      include: {
+        category: { select: CATEGORY_SELECT }
+      }
     });
+
+    triggerB2CRevalidation('products');
 
     res.status(200).json({
       message: 'Producto actualizado exitosamente',
       product: updatedProduct
     });
-
   } catch (error: any) {
-    if (error.code === 'P2002') res.status(409).json({ error: 'El SKU ya está en uso.' });
-    else res.status(500).json({ error: 'Error interno al actualizar el producto' });
+    if (error.code === 'P2002') {
+      res.status(409).json({ error: 'El SKU ya está en uso.' });
+      return;
+    }
+    console.error('[ProductsController] Error en updateProduct:', error);
+    res.status(500).json({ error: 'Error interno al actualizar el producto' });
   }
 };
 
@@ -102,6 +223,8 @@ export const deactivateProduct = async (req: Request, res: Response): Promise<vo
       where: { id },
       data: { is_active: false }
     });
+
+    triggerB2CRevalidation('products');
 
     res.status(200).json({
       message: 'Producto dado de baja lógicamente. Ya no será visible en el Storefront.',
@@ -122,7 +245,17 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
     const limit = parseInt(req.query.limit as string) || 20;
     const skip = (page - 1) * limit;
     const userRole = (req as any).user?.role;
-    const whereClause = userRole === 'ADMIN' ? {} : { is_active: true };
+
+    const whereClause: Prisma.ProductWhereInput = userRole === 'ADMIN' ? {} : { is_active: true };
+
+    const categoryFilter = await buildCategoryWhereFilter(
+      req.prisma,
+      req.query.category_id as string | undefined,
+      req.query.category_slug as string | undefined
+    );
+    if (categoryFilter) {
+      Object.assign(whereClause, categoryFilter);
+    }
 
     const products = await req.prisma.product.findMany({
       where: whereClause,
@@ -136,6 +269,7 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
         physical_stock: true,
         is_combo: true,
         category_id: true,
+        category: { select: CATEGORY_SELECT },
         is_active: true,
         purchase_cost: true,
         commission_rate: true
@@ -143,7 +277,6 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
     });
 
     const comboIds = products.filter(p => p.is_combo).map(p => p.id);
-
     const comboStocks = await RedisService.getMultipleComboStocks(comboIds);
 
     const hydratedProducts = products.map(product => {
@@ -157,7 +290,6 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
     });
 
     const activeRules = await RedisService.getActivePaymentRules();
-
     const finalProducts = PricingEngine.applyDynamicPricing(hydratedProducts, activeRules);
 
     const total = await req.prisma.product.count({ where: whereClause });
@@ -176,15 +308,14 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
   try {
     const id = req.params.id as string;
 
-    const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-    if (!uuidRegex.test(id)) {
+    if (!UUID_REGEX.test(id)) {
       res.status(400).json({ error: 'Formato de ID inválido' });
       return;
     }
 
     const userRole = (req as any).user?.role;
-    
-    const whereClause: any = { id };
+
+    const whereClause: Prisma.ProductWhereInput = { id };
     if (userRole !== 'ADMIN' && userRole !== 'SELLER') {
       whereClause.is_active = true;
     }
@@ -192,6 +323,7 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
     const product = await req.prisma.product.findFirst({
       where: whereClause,
       include: {
+        category: { select: CATEGORY_SELECT },
         combo_parts: {
           include: {
             product: {
@@ -242,6 +374,8 @@ export const reactivateProduct = async (req: Request, res: Response): Promise<vo
       data: { is_active: true }
     });
 
+    triggerB2CRevalidation('products');
+
     res.status(200).json({
       message: 'Producto reactivado exitosamente. Vuelve a ser visible en el Storefront.',
       product: reactivatedProduct
@@ -257,13 +391,20 @@ export const reactivateProduct = async (req: Request, res: Response): Promise<vo
 
 export const createCombo = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { 
-      sku, 
-      name, 
-      base_price, 
-      commission_rate, 
-      parts 
+    const {
+      sku,
+      name,
+      base_price,
+      commission_rate,
+      category_id,
+      parts
     } = req.body;
+
+    const categoryCheck = await validateLeafCategory(req.prisma, category_id);
+    if (!categoryCheck.valid) {
+      res.status(400).json({ error: categoryCheck.error });
+      return;
+    }
 
     if (!parts || !Array.isArray(parts) || parts.length === 0) {
       res.status(400).json({ error: 'Un combo debe contener al menos un componente.' });
@@ -273,7 +414,7 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
     const partSkus = parts.map((p: { sku: string; quantity: number }) => p.sku);
 
     const dbParts = await req.prisma.product.findMany({
-      where: { 
+      where: {
         sku: { in: partSkus },
         is_active: true
       }
@@ -330,11 +471,13 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
           physical_stock: 0,
           is_combo: true,
           commission_rate: new Prisma.Decimal(commission_rate),
+          category_id,
           combo_parts: {
             create: comboItemsToInsert
           }
         },
         include: {
+          category: { select: CATEGORY_SELECT },
           combo_parts: {
             include: {
               product: {
@@ -348,6 +491,7 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
 
     await RedisService.setComboStock(newCombo.id, calculatedInitialStock);
     await RedisService.registerComboDependencies(newCombo.id, partIdsToRegister);
+    triggerB2CRevalidation('products');
 
     res.status(201).json({
       message: 'Combo creado exitosamente y sincronizado con Redis',
@@ -356,6 +500,8 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
         sku: newCombo.sku,
         name: newCombo.name,
         base_price: newCombo.base_price,
+        category_id: newCombo.category_id,
+        category: newCombo.category,
         virtual_stock: calculatedInitialStock,
         parts: newCombo.combo_parts.map(cp => ({
           sku: cp.product.sku,
@@ -365,20 +511,20 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
         }))
       }
     });
-
   } catch (error: any) {
     if (error.code === 'P2002') {
       res.status(409).json({ error: 'El SKU ingresado para el combo ya existe en el catálogo.' });
       return;
     }
+    console.error('[ProductsController] Error en createCombo:', error);
     res.status(500).json({ error: 'Error interno al crear el combo' });
   }
 };
-  
+
 export const updateCombo = async (req: Request, res: Response): Promise<void> => {
   try {
     const comboId = req.params.id as string;
-    const { name, base_price, commission_rate, parts } = req.body;
+    const { name, base_price, commission_rate, category_id, parts } = req.body;
 
     if (!parts || !Array.isArray(parts) || parts.length === 0) {
       res.status(400).json({ error: 'Un combo debe contener al menos un componente.' });
@@ -395,9 +541,17 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
+    if (category_id !== undefined) {
+      const categoryCheck = await validateLeafCategory(req.prisma, category_id);
+      if (!categoryCheck.valid) {
+        res.status(400).json({ error: categoryCheck.error });
+        return;
+      }
+    }
+
     const partSkus = parts.map((p: { sku: string; quantity: number }) => p.sku);
     const dbParts = await req.prisma.product.findMany({
-      where: { 
+      where: {
         sku: { in: partSkus },
         is_active: true
       }
@@ -443,14 +597,16 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
       return await tx.product.update({
         where: { id: comboId },
         data: {
-          name,
-          base_price: new Prisma.Decimal(base_price),
-          commission_rate: new Prisma.Decimal(commission_rate),
+          ...(name !== undefined && { name }),
+          ...(base_price !== undefined && { base_price: new Prisma.Decimal(base_price) }),
+          ...(commission_rate !== undefined && { commission_rate: new Prisma.Decimal(commission_rate) }),
+          ...(category_id !== undefined && { category_id }),
           combo_parts: {
             create: comboItemsToInsert
           }
         },
         include: {
+          category: { select: CATEGORY_SELECT },
           combo_parts: {
             include: { product: { select: { sku: true, name: true } } }
           }
@@ -459,13 +615,14 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
     });
 
     await RedisService.setComboStock(comboId, calculatedVirtualStock);
-    
+
     const oldPartIds = existingCombo.combo_parts.map((cp: any) => cp.product_id);
     if (oldPartIds.length > 0) {
-        await RedisService.removeComboDependencies(comboId, oldPartIds); 
+      await RedisService.removeComboDependencies(comboId, oldPartIds);
     }
-    
+
     await RedisService.registerComboDependencies(comboId, partIdsToRegister);
+    triggerB2CRevalidation('products');
 
     res.status(200).json({
       message: 'Combo actualizado exitosamente.',
@@ -474,10 +631,11 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
         sku: updatedCombo.sku,
         name: updatedCombo.name,
         base_price: updatedCombo.base_price,
-        virtual_stock: calculatedVirtualStock,
+        category_id: updatedCombo.category_id,
+        category: updatedCombo.category,
+        virtual_stock: calculatedVirtualStock
       }
     });
-
   } catch (error: any) {
     console.error('[ProductsController] Error en updateCombo:', error);
     res.status(500).json({ error: 'Error interno al actualizar el combo' });
@@ -489,12 +647,21 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
     const skip = (page - 1) * limit;
-    
+
     const type = req.query.type as string;
 
     const whereClause: Prisma.ProductWhereInput = {};
     if (type === 'simple') whereClause.is_combo = false;
     if (type === 'combo') whereClause.is_combo = true;
+
+    const categoryFilter = await buildCategoryWhereFilter(
+      req.prisma,
+      req.query.category_id as string | undefined,
+      req.query.category_slug as string | undefined
+    );
+    if (categoryFilter) {
+      Object.assign(whereClause, categoryFilter);
+    }
 
     const products = await req.prisma.product.findMany({
       skip,
@@ -508,6 +675,7 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
         physical_stock: true,
         is_combo: true,
         category_id: true,
+        category: { select: CATEGORY_SELECT },
         is_active: true,
         purchase_cost: true,
         commission_rate: true,
@@ -523,8 +691,8 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
     });
 
     const comboIds = products.filter(p => p.is_combo).map(p => p.id);
-    const comboStocks = comboIds.length > 0 
-      ? await RedisService.getMultipleComboStocks(comboIds) 
+    const comboStocks = comboIds.length > 0
+      ? await RedisService.getMultipleComboStocks(comboIds)
       : {};
 
     const hydratedProducts = products.map(product => {
@@ -536,10 +704,10 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
         return {
           ...product,
           physical_stock: comboStocks[product.id] ?? 0,
-          purchase_cost: new Prisma.Decimal(dynamicCost),
+          purchase_cost: new Prisma.Decimal(dynamicCost)
         };
       }
-      
+
       const { combo_parts, ...simpleProduct } = product;
       return simpleProduct;
     });
@@ -564,6 +732,15 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
 
     const whereClause: Prisma.ProductWhereInput = { is_active: true };
 
+    const categoryFilter = await buildCategoryWhereFilter(
+      prismaGlobal,
+      req.query.category_id as string | undefined,
+      req.query.category_slug as string | undefined
+    );
+    if (categoryFilter) {
+      Object.assign(whereClause, categoryFilter);
+    }
+
     const products = await prismaGlobal.product.findMany({
       where: whereClause,
       skip,
@@ -576,13 +753,14 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
         physical_stock: true,
         is_combo: true,
         category_id: true,
+        category: { select: CATEGORY_SELECT },
         combo_parts: {
           include: {
             product: {
-              select: { 
-                sku: true, 
-                name: true, 
-                physical_stock: true 
+              select: {
+                sku: true,
+                name: true,
+                physical_stock: true
               }
             }
           }
@@ -591,18 +769,18 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
     });
 
     const comboIds = products.filter(p => p.is_combo).map(p => p.id);
-    const comboStocks = comboIds.length > 0 
-      ? await RedisService.getMultipleComboStocks(comboIds) 
+    const comboStocks = comboIds.length > 0
+      ? await RedisService.getMultipleComboStocks(comboIds)
       : {};
 
     const hydratedProducts = products.map(product => {
-      const parts = product.combo_parts || []; 
-      
+      const parts = product.combo_parts || [];
+
       if (product.is_combo) {
-        return { 
-          ...product, 
+        return {
+          ...product,
           combo_parts: parts,
-          physical_stock: comboStocks[product.id] ?? 0 
+          physical_stock: comboStocks[product.id] ?? 0
         };
       }
       return product;
@@ -629,13 +807,12 @@ export const getStorefrontProductById = async (req: Request, res: Response): Pro
   try {
     const id = req.params.id as string;
 
-    const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-    if (!uuidRegex.test(id)) {
+    if (!UUID_REGEX.test(id)) {
       res.status(400).json({ error: 'Formato de ID inválido en la URL' });
       return;
     }
 
-    const product = await req.prisma.product.findFirst({
+    const product = await prismaGlobal.product.findFirst({
       where: { id, is_active: true },
       select: {
         id: true,
@@ -645,6 +822,7 @@ export const getStorefrontProductById = async (req: Request, res: Response): Pro
         physical_stock: true,
         is_combo: true,
         category_id: true,
+        category: { select: CATEGORY_SELECT },
         combo_parts: {
           include: {
             product: {

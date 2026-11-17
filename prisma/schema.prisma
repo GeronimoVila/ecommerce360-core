@@ -104,8 +104,8 @@ model Product {
   is_combo           Boolean                @default(false)
   commission_rate    Decimal                @db.Decimal(5, 2)
   is_active          Boolean                @default(true)
-  category_id        String?                @db.Uuid
-  category           Category?              @relation(fields: [category_id], references: [id], onDelete: SetNull)
+  category_id        String                 @db.Uuid
+  category           Category               @relation(fields: [category_id], references: [id], onDelete: Restrict)
   payment_rules      PaymentRule[]
   combos_where_part  ComboItem[]            @relation("ComboPart")
   combo_parts        ComboItem[]            @relation("ComboParent")
@@ -214,17 +214,24 @@ model CommissionLedger {
 }
 
 model Category {
-  id        String  @id @default(uuid()) @db.Uuid
+  id        String   @id @default(uuid()) @db.Uuid
   name      String
-  slug      String  @unique
-  is_active Boolean @default(true)
+  slug      String   @unique
+  parent_id String?  @db.Uuid
+  path      String
+  depth     Int      @default(0)
+  is_active Boolean  @default(true)
 
+  parent        Category?     @relation("CategoryTree", fields: [parent_id], references: [id], onDelete: Restrict)
+  children      Category[]    @relation("CategoryTree")
   products      Product[]
   payment_rules PaymentRule[]
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
+  @@index([parent_id])
+  @@index([path])
   @@map("categories")
 }
 

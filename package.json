@@ -9,7 +9,7 @@
     "start": "node dist/server.js"
   },
   "prisma": {
-    "seed": "tsx src/scripts/seed.ts"
+    "seed": "tsx prisma/seed.ts"
   },
   "keywords": [],
   "author": "",

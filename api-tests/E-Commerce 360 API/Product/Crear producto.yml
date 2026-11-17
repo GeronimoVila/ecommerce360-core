@@ -10,13 +10,14 @@ http:
     type: json
     data: |-
       {
-        "sku": "IPH-14-PRO-64",
-        "name": "iPhone 14 Pro 64GB",
+        "sku": "heladera-samsung",
+        "name": "Heladera Samsung",
         "purchase_cost": 10,
         "vat_rate": 21,
         "profit_margin": 30,
         "physical_stock": 50,
-        "commission_rate": 5.0
+        "commission_rate": 5.0,
+        "category_id": "f68c1ec3-0a81-4cbd-85e1-90d3f8b80193"
       }
   auth: inherit
 

@@ -3,6 +3,8 @@ import { prismaGlobal } from '../config/prisma';
 import { MercadoPagoConfig, Payment } from 'mercadopago';
 import { createMpPreference } from './mercadopago.service';
 import { generateMobbexSessionForOrder } from '../mobbex/mobbex.controller';
+import { RedisService } from '../redis/redis.service';
+import { PricingEngine } from '../products/pricing.engine';
 
 const mpClient = new MercadoPagoConfig({ 
     accessToken: process.env.MP_ACCESS_TOKEN || '', 
@@ -44,11 +46,19 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
 
         const productIds = items.map((i: { productId: string }) => i.productId);
         const dbProducts = await prismaGlobal.product.findMany({
-            where: { 
-                id: { in: productIds },
-                is_active: true 
+        where: {
+            id: { in: productIds },
+            is_active: true
+        },
+        include: {
+            category: {
+            select: { id: true, path: true }
             }
+        }
         });
+
+        const activeRules = await RedisService.getActivePaymentRules();
+        const pricedProducts = PricingEngine.applyDynamicPricing(dbProducts, activeRules);
 
         if (dbProducts.length !== items.length) {
             return res.status(400).json({ error: 'Uno o más productos del carrito no existen o están inactivos.' });

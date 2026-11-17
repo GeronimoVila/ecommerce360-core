@@ -7,10 +7,11 @@ export class PricingEngine {
 
     return products.map(product => {
       const basePrice = parseFloat(product.base_price.toString());
-      
-      const applicableRules = activeRules.filter(rule => 
-        rule.is_global === true || 
-        rule.category_id === product.category_id || 
+      const categoryPath: string = product.category?.path || (product.category_id ? `/${product.category_id}/` : '');
+
+      const applicableRules = activeRules.filter(rule =>
+        rule.is_global === true ||
+        (rule.category_id && categoryPath.includes(`/${rule.category_id}/`)) ||
         rule.product_id === product.id
       );
 
@@ -19,9 +20,9 @@ export class PricingEngine {
       for (const rule of applicableRules) {
         const key = `${rule.payment_method}_${rule.installments}`;
         const currentRule = resolvedRules.get(key);
-        
-        const newScore = this.getRuleScore(rule, product.id, product.category_id);
-        const currentScore = currentRule ? this.getRuleScore(currentRule, product.id, product.category_id) : 0;
+
+        const newScore = this.getRuleScore(rule, product.id, categoryPath);
+        const currentScore = currentRule ? this.getRuleScore(currentRule, product.id, categoryPath) : 0;
 
         if (newScore > currentScore) {
           resolvedRules.set(key, rule);
@@ -62,10 +63,14 @@ export class PricingEngine {
     });
   }
 
-  private static getRuleScore(rule: PaymentRule, productId: string, categoryId: string | null): number {
-    if (rule.product_id === productId) return 3; 
-    if (rule.category_id && rule.category_id === categoryId) return 2; 
-    if (rule.is_global) return 1; 
+  private static getRuleScore(rule: PaymentRule, productId: string, categoryPath: string): number {
+    if (rule.product_id === productId) return 1000;
+    if (rule.category_id && categoryPath.includes(`/${rule.category_id}/`)) {
+      const index = categoryPath.indexOf(`/${rule.category_id}/`);
+      const depthWeight = categoryPath.substring(0, index).split('/').filter(Boolean).length + 1;
+      return 10 + depthWeight;
+    }
+    if (rule.is_global) return 1;
     return 0;
   }
 }

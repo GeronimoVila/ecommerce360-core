@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { prismaGlobal } from '../config/prisma';
 import { createMpPreference, getMpPaymentById } from './mercadopago.service';
 import { generateMobbexSessionForOrder } from '../mobbex/mobbex.controller';
+import { RedisService } from '../redis/redis.service';
+import { PricingEngine } from '../products/pricing.engine';
 
 const BUDGET_EXPIRATION_HOURS = 48;
 
@@ -49,9 +51,20 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
     }
 
     const productIds = items.map((i: { productId: string }) => i.productId);
-    const dbProducts = await req.prisma.product.findMany({
-      where: { id: { in: productIds }, is_active: true },
+    const dbProducts = await prismaGlobal.product.findMany({
+      where: {
+        id: { in: productIds },
+        is_active: true
+      },
+      include: {
+        category: {
+          select: { id: true, path: true }
+        }
+      }
     });
+
+    const activeRules = await RedisService.getActivePaymentRules();
+    const pricedProducts = PricingEngine.applyDynamicPricing(dbProducts, activeRules);
 
     if (dbProducts.length !== items.length) {
       return res.status(400).json({ error: 'Discrepancia en catálogo: Productos inactivos o inexistentes.' });

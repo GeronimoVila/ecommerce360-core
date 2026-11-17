@@ -15,6 +15,7 @@ import commissionsRoutes from './commissions/commissions.routes';
 import ordersRoutes from './orders/orders.routes';
 import dashboardRoutes from './dashboard/dashboard.routes';
 import mobbexRoutes from './mobbex/mobbex.routes';
+import categoriesRoutes from './categories/categories.routes';
 
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -67,6 +68,7 @@ app.use('/api/v1/commissions', commissionsRoutes);
 app.use('/api/v1/orders', ordersRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/mobbex', mobbexRoutes);
+app.use('/api/v1/categories', categoriesRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: "Core Engine Operativo", version: "1.0.1" });

@@ -4,7 +4,8 @@ import prisma from '../config/prisma';
 const redisClient = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
 const CACHE_KEYS = {
-  PAYMENT_RULES: 'catalog:payment_rules'
+  PAYMENT_RULES: 'catalog:payment_rules',
+  CATEGORIES_TREE: 'catalog:categories_tree'
 };
 
 export const RedisService = {
@@ -158,5 +159,31 @@ export const RedisService = {
     const key = `seller_validation:${sellerId}`;
     const data = await redisClient.get(key);
     return data ? JSON.parse(data) : null;
+  },
+
+  async getCategoriesTree(): Promise<any[] | null> {
+    try {
+      const cached = await redisClient.get(CACHE_KEYS.CATEGORIES_TREE);
+      return cached ? JSON.parse(cached) : null;
+    } catch (error) {
+      console.error('[RedisService] Error leyendo árbol de categorías:', error);
+      return null;
+    }
+  },
+
+  async setCategoriesTree(tree: any[], ttlSeconds: number = 3600): Promise<void> {
+    try {
+      await redisClient.setex(CACHE_KEYS.CATEGORIES_TREE, ttlSeconds, JSON.stringify(tree));
+    } catch (error) {
+      console.error('[RedisService] Error guardando árbol de categorías:', error);
+    }
+  },
+
+  async invalidateCategoriesTree(): Promise<void> {
+    try {
+      await redisClient.del(CACHE_KEYS.CATEGORIES_TREE);
+    } catch (error) {
+      console.error('[RedisService] Error invalidando árbol de categorías:', error);
+    }
   }
 };
