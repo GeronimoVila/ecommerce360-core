@@ -25,7 +25,6 @@ export const createMpPreference = async (orderId: string, items: MpItem[], custo
         const hasPublicWebhook = Boolean(rawWebhookUrl && rawWebhookUrl.startsWith('https://'));
         const isFrontendLocal = frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1');
 
-        // Si el frontend es localhost, usamos el bridge HTTPS del backend para que MP muestre "Volver al sitio"
         const returnEntrypoint = (isFrontendLocal && hasPublicWebhook)
             ? `${rawWebhookUrl}/api/v1/checkout/mp-bridge`
             : `${frontendUrl}/checkout/success`;
@@ -51,7 +50,6 @@ export const createMpPreference = async (orderId: string, items: MpItem[], custo
             external_reference: String(orderId)
         };
 
-        // Al pasar una URL HTTPS pública (el bridge o producción), MP habilita botón + auto_return
         if (returnEntrypoint.startsWith('https://')) {
             body.auto_return = 'approved';
         }

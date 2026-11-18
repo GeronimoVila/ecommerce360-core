@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
-import { prismaGlobal } from '../config/prisma'; 
+import { prismaGlobal } from '../config/prisma';
+import { RedisService } from '../redis/redis.service';
 
 export const syncCart = async (req: Request, res: Response): Promise<Response | void> => {
     try {
@@ -9,33 +10,67 @@ export const syncCart = async (req: Request, res: Response): Promise<Response | 
         }
 
         const productIds = items.map(i => i.productId);
-        
+
         const dbProducts = await prismaGlobal.product.findMany({
             where: { id: { in: productIds } },
-            select: { id: true, name: true, base_price: true, physical_stock: true, is_active: true }
+            select: {
+                id: true,
+                name: true,
+                base_price: true,
+                physical_stock: true,
+                is_combo: true,
+                is_active: true,
+                images: {
+                    orderBy: [
+                        { is_primary: 'desc' },
+                        { position: 'asc' }
+                    ],
+                    take: 1,
+                    select: { url: true }
+                }
+            }
         });
+
+        const comboIds = dbProducts.filter(p => p.is_combo).map(p => p.id);
+        const comboStocks = comboIds.length > 0
+            ? await RedisService.getMultipleComboStocks(comboIds)
+            : {};
 
         let subtotal = 0;
         let hasErrors = false;
 
         const hydratedItems = items.map(reqItem => {
             const dbProduct = dbProducts.find(p => p.id === reqItem.productId);
-            
+
             if (!dbProduct) {
                 hasErrors = true;
                 return { ...reqItem, error: 'Producto no encontrado en el catálogo.' };
             }
+
+            const primaryImageUrl = dbProduct.images[0]?.url || null;
+            const effectiveStock = dbProduct.is_combo
+                ? (comboStocks[dbProduct.id] ?? 0)
+                : dbProduct.physical_stock;
+
             if (!dbProduct.is_active) {
                 hasErrors = true;
-                return { ...reqItem, error: 'El producto ya no está disponible.', name: dbProduct.name };
+                return {
+                    ...reqItem,
+                    error: 'El producto ya no está disponible.',
+                    name: dbProduct.name,
+                    imageUrl: primaryImageUrl
+                };
             }
-            if (dbProduct.physical_stock < reqItem.quantity) {
+
+            if (effectiveStock < reqItem.quantity) {
                 hasErrors = true;
-                return { 
-                    ...reqItem, 
-                    error: 'Stock insuficiente.', 
-                    availableStock: dbProduct.physical_stock,
-                    name: dbProduct.name 
+                return {
+                    ...reqItem,
+                    error: effectiveStock === 0 ? 'Sin stock disponible.' : 'Stock insuficiente.',
+                    availableStock: effectiveStock,
+                    name: dbProduct.name,
+                    unitPrice: Number(dbProduct.base_price),
+                    imageUrl: primaryImageUrl
                 };
             }
 
@@ -49,7 +84,8 @@ export const syncCart = async (req: Request, res: Response): Promise<Response | 
                 unitPrice: price,
                 quantity: reqItem.quantity,
                 itemTotal,
-                availableStock: dbProduct.physical_stock
+                availableStock: effectiveStock,
+                imageUrl: primaryImageUrl
             };
         });
 
@@ -79,18 +115,18 @@ export const validateCoupon = async (req: Request, res: Response): Promise<Respo
 
         if (!coupon) return res.status(404).json({ error: 'Cupón no encontrado.' });
         if (!coupon.is_active) return res.status(400).json({ error: 'El cupón ha sido desactivado.' });
-        
+
         const now = new Date();
         if (coupon.starts_at && coupon.starts_at > now) return res.status(400).json({ error: 'El cupón aún no entra en vigencia.' });
         if (coupon.expires_at && coupon.expires_at < now) return res.status(400).json({ error: 'El cupón ha caducado.' });
-        
+
         if (coupon.max_uses !== null && coupon.used_count >= coupon.max_uses) {
             return res.status(400).json({ error: 'El cupón agotó su límite máximo de usos globales.' });
         }
-        
+
         const subtotalNum = Number(cartSubtotal);
         const minPurchase = Number(coupon.min_purchase_amount || 0);
-        
+
         if (minPurchase > 0 && subtotalNum < minPurchase) {
             return res.status(400).json({ error: `La compra mínima requerida es de $${minPurchase}.` });
         }

@@ -15,6 +15,14 @@ const CATEGORY_SELECT = {
   depth: true
 };
 
+const PRODUCT_IMAGES_SELECT = {
+  id: true,
+  url: true,
+  alt_text: true,
+  position: true,
+  is_primary: true
+};
+
 async function validateLeafCategory(
   prismaClient: any,
   categoryId?: string
@@ -120,7 +128,11 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
         category_id
       },
       include: {
-        category: { select: CATEGORY_SELECT }
+        category: { select: CATEGORY_SELECT },
+        images: {
+          orderBy: { position: 'asc' },
+          select: PRODUCT_IMAGES_SELECT
+        }
       }
     });
 
@@ -195,7 +207,11 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
       where: { id },
       data: dataToUpdate,
       include: {
-        category: { select: CATEGORY_SELECT }
+        category: { select: CATEGORY_SELECT },
+        images: {
+          orderBy: { position: 'asc' },
+          select: PRODUCT_IMAGES_SELECT
+        }
       }
     });
 
@@ -272,7 +288,11 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
         category: { select: CATEGORY_SELECT },
         is_active: true,
         purchase_cost: true,
-        commission_rate: true
+        commission_rate: true,
+        images: {
+          orderBy: { position: 'asc' },
+          select: PRODUCT_IMAGES_SELECT
+        }
       }
     });
 
@@ -325,6 +345,10 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
       where: whereClause,
       include: {
         category: { select: CATEGORY_SELECT },
+        images: {
+          orderBy: { position: 'asc' },
+          select: PRODUCT_IMAGES_SELECT
+        },
         combo_parts: {
           include: {
             product: {
@@ -479,6 +503,10 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
         },
         include: {
           category: { select: CATEGORY_SELECT },
+          images: {
+            orderBy: { position: 'asc' },
+            select: PRODUCT_IMAGES_SELECT
+          },
           combo_parts: {
             include: {
               product: {
@@ -503,6 +531,7 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
         base_price: newCombo.base_price,
         category_id: newCombo.category_id,
         category: newCombo.category,
+        images: newCombo.images,
         virtual_stock: calculatedInitialStock,
         parts: newCombo.combo_parts.map(cp => ({
           sku: cp.product.sku,
@@ -608,6 +637,10 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
         },
         include: {
           category: { select: CATEGORY_SELECT },
+          images: {
+            orderBy: { position: 'asc' },
+            select: PRODUCT_IMAGES_SELECT
+          },
           combo_parts: {
             include: { product: { select: { sku: true, name: true } } }
           }
@@ -634,6 +667,7 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
         base_price: updatedCombo.base_price,
         category_id: updatedCombo.category_id,
         category: updatedCombo.category,
+        images: updatedCombo.images,
         virtual_stock: calculatedVirtualStock
       }
     });
@@ -680,6 +714,10 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
         is_active: true,
         purchase_cost: true,
         commission_rate: true,
+        images: {
+          orderBy: { position: 'asc' },
+          select: PRODUCT_IMAGES_SELECT
+        },
         combo_parts: {
           include: {
             product: {
@@ -755,6 +793,10 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
         is_combo: true,
         category_id: true,
         category: { select: CATEGORY_SELECT },
+        images: {
+          orderBy: { position: 'asc' },
+          select: PRODUCT_IMAGES_SELECT
+        },
         combo_parts: {
           include: {
             product: {
@@ -824,6 +866,10 @@ export const getStorefrontProductById = async (req: Request, res: Response): Pro
         is_combo: true,
         category_id: true,
         category: { select: CATEGORY_SELECT },
+        images: {
+          orderBy: { position: 'asc' },
+          select: PRODUCT_IMAGES_SELECT
+        },
         combo_parts: {
           include: {
             product: {

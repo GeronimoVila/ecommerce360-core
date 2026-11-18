@@ -5,6 +5,7 @@ import { RedisService } from '../redis/redis.service';
 import { resolveMobbexCredentials, encryptToken } from './mobbexAuth.service';
 
 const DEFAULT_TENANT = 'DEFAULT_STORE';
+const FALLBACK_MOBBEX_IMAGE = 'https://via.placeholder.com/150';
 
 export const getMobbexStatus = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -184,7 +185,22 @@ export async function generateMobbexSessionForOrder(orderId: string) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: {
-      items: { include: { product: true } },
+      items: {
+        include: {
+          product: {
+            include: {
+              images: {
+                orderBy: [
+                  { is_primary: 'desc' },
+                  { position: 'asc' },
+                ],
+                take: 1,
+                select: { url: true },
+              },
+            },
+          },
+        },
+      },
       customer: { include: { user: true } },
     },
   });
@@ -201,12 +217,20 @@ export async function generateMobbexSessionForOrder(orderId: string) {
   const reference = auth.isDemoFallback ? `E360_DEV_${order.id}_${Date.now()}` : order.id;
   const orderTotal = Number(order.total_amount);
 
-  const mobbexItems = order.items.map((item) => ({
-    image: 'https://via.placeholder.com/150',
-    quantity: item.quantity,
-    description: item.product ? `${item.product.name} (${item.product.sku})` : 'Producto Ecommerce 360',
-    total: Number(item.unit_price) * item.quantity,
-  }));
+  const mobbexItems = order.items.map((item) => {
+    const productImageUrl = item.product?.images?.[0]?.url;
+    const validHttpsImage =
+      productImageUrl && productImageUrl.startsWith('https://')
+        ? productImageUrl
+        : FALLBACK_MOBBEX_IMAGE;
+
+    return {
+      image: validHttpsImage,
+      quantity: item.quantity,
+      description: item.product ? `${item.product.name} (${item.product.sku})` : 'Producto Ecommerce 360',
+      total: Number(item.unit_price) * item.quantity,
+    };
+  });
 
   const customerEmail = order.customer?.user?.email || 'cliente@ecommerce360.com';
   const customerFullName =

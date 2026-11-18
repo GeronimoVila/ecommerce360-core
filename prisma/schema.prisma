@@ -111,6 +111,7 @@ model Product {
   combo_parts        ComboItem[]            @relation("ComboParent")
   order_items        OrderItem[]
   supplier_purchases SupplierPurchaseItem[]
+  images             ProductImage[]
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
@@ -336,4 +337,22 @@ model PaymentGatewayConfig {
 
   @@unique([tenantId, provider])
   @@map("payment_gateway_configs")
+}
+
+model ProductImage {
+  id           String   @id @default(uuid()) @db.Uuid
+  product_id   String?  @db.Uuid
+  url          String
+  storage_key  String   @unique
+  alt_text     String?
+  position     Int      @default(0)
+  is_primary   Boolean  @default(false)
+  is_committed Boolean  @default(false)
+  created_at   DateTime @default(now())
+
+  product Product? @relation(fields: [product_id], references: [id], onDelete: Cascade)
+
+  @@index([product_id, position])
+  @@index([is_committed, created_at])
+  @@map("product_images")
 }
