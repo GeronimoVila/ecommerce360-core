@@ -15,21 +15,21 @@ export const getAvailableCommissions = async (req: Request, res: Response): Prom
       return;
     }
 
-    const sellerIds = aggregates.map(a => a.seller_id);
+    const sellerProfileIds = aggregates.map(a => a.seller_id);
 
     const [sellers, rawIds] = await Promise.all([
       req.prisma.sellerProfile.findMany({
-        where: { user_id: { in: sellerIds } },
-        select: { user_id: true, first_name: true, last_name: true, cbu_alias: true }
+        where: { id: { in: sellerProfileIds } },
+        select: { id: true, user_id: true, first_name: true, last_name: true, cbu_alias: true }
       }),
       req.prisma.commissionLedger.findMany({
-        where: { status: CommissionStatus.AVAILABLE, seller_id: { in: sellerIds } },
+        where: { status: CommissionStatus.AVAILABLE, seller_id: { in: sellerProfileIds } },
         select: { id: true, seller_id: true }
       })
     ]);
 
-    const sellerMap = new Map(sellers.map(s => [s.user_id, s]));
-    
+    const sellerMap = new Map(sellers.map(s => [s.id, s]));
+
     const commissionIdsMap = new Map<string, string[]>();
     rawIds.forEach(record => {
       if (!commissionIdsMap.has(record.seller_id)) {
@@ -98,6 +98,7 @@ export const liquidateCommissions = async (req: Request, res: Response): Promise
           status: CommissionStatus.LIQUIDATED,
           clearing_date: new Date(),
           payout_id: payout.id,
+          payoutId: payout.id,
         },
       });
 
@@ -139,5 +140,188 @@ export const getPayoutHistory = async (req: Request, res: Response): Promise<voi
   } catch (error) {
     console.error('[Commissions] Error al obtener el historial de liquidaciones:', error);
     res.status(500).json({ error: 'Error interno del servidor al consultar historial.' });
+  }
+};
+
+export const getMyCommissions = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) {
+      res.status(401).json({ error: 'Usuario no autenticado.' });
+      return;
+    }
+
+    const sellerProfile = await req.prisma.sellerProfile.findUnique({
+      where: { user_id: userId },
+      select: { id: true, first_name: true, last_name: true, cbu_alias: true }
+    });
+
+    if (!sellerProfile) {
+      res.status(404).json({ error: 'Perfil de vendedor no encontrado para este usuario.' });
+      return;
+    }
+
+    const statusParam = req.query.status as string | undefined;
+    const validStatuses = Object.values(CommissionStatus);
+    const statusFilter =
+      statusParam && validStatuses.includes(statusParam as CommissionStatus)
+        ? (statusParam as CommissionStatus)
+        : undefined;
+
+    const [groupedTotals, ledgerRecords] = await Promise.all([
+      req.prisma.commissionLedger.groupBy({
+        by: ['status'],
+        where: { seller_id: sellerProfile.id },
+        _sum: { amount: true },
+        _count: { id: true }
+      }),
+      req.prisma.commissionLedger.findMany({
+        where: {
+          seller_id: sellerProfile.id,
+          ...(statusFilter ? { status: statusFilter } : {})
+        },
+        orderBy: { created_at: 'desc' },
+        include: {
+          order: {
+            select: {
+              id: true,
+              created_at: true,
+              total_amount: true,
+              status: true,
+              customer: {
+                select: { first_name: true, last_name: true }
+              },
+              items: {
+                select: {
+                  quantity: true,
+                  applied_commission_rate: true,
+                  product: {
+                    select: { name: true, sku: true }
+                  }
+                }
+              }
+            }
+          }
+        }
+      })
+    ]);
+
+    let availableBalance = 0;
+    let pendingClearanceBalance = 0;
+    let liquidatedTotal = 0;
+    const counts = {
+      available: 0,
+      pending_clearance: 0,
+      liquidated: 0,
+      canceled: 0
+    };
+
+    for (const group of groupedTotals) {
+      const sum = Number(group._sum.amount || 0);
+      const count = group._count.id;
+
+      if (group.status === CommissionStatus.AVAILABLE) {
+        availableBalance = sum;
+        counts.available = count;
+      } else if (group.status === CommissionStatus.PENDING_CLEARANCE) {
+        pendingClearanceBalance = sum;
+        counts.pending_clearance = count;
+      } else if (group.status === CommissionStatus.LIQUIDATED) {
+        liquidatedTotal = sum;
+        counts.liquidated = count;
+      } else if (group.status === CommissionStatus.CANCELED) {
+        counts.canceled = count;
+      }
+    }
+
+    const formattedCommissions = ledgerRecords.map((entry) => {
+      const customerName = entry.order?.customer
+        ? `${entry.order.customer.first_name || ''} ${entry.order.customer.last_name || ''}`.trim() || 'Cliente Web'
+        : 'Cliente Web';
+
+      const itemsSummary = entry.order?.items?.length
+        ? entry.order.items
+            .map(
+              (item) =>
+                `${item.quantity}x ${item.product?.name || 'Producto'} (${Number(item.applied_commission_rate)}%)`
+            )
+            .join(', ')
+        : 'Venta atribuida';
+
+      return {
+        id: entry.id,
+        order_id: entry.order_id,
+        order_date: entry.order?.created_at || entry.created_at,
+        order_total: Number(entry.order?.total_amount || 0),
+        order_status: entry.order?.status || 'PAID',
+        customer_name: customerName,
+        items_summary: itemsSummary,
+        amount: Number(entry.amount),
+        status: entry.status,
+        clearing_date: entry.clearing_date,
+        payout_id: entry.payout_id || entry.payoutId || null,
+        created_at: entry.created_at
+      };
+    });
+
+    res.status(200).json({
+      summary: {
+        seller_id: sellerProfile.id,
+        seller_name: `${sellerProfile.first_name} ${sellerProfile.last_name}`.trim(),
+        cbu_alias: sellerProfile.cbu_alias || null,
+        available_balance: availableBalance,
+        pending_clearance_balance: pendingClearanceBalance,
+        liquidated_total: liquidatedTotal,
+        counts
+      },
+      commissions: formattedCommissions
+    });
+  } catch (error) {
+    console.error('[Commissions] Error al obtener comisiones del vendedor:', error);
+    res.status(500).json({ error: 'Error interno al consultar tus comisiones.' });
+  }
+};
+
+export const getMyPayouts = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) {
+      res.status(401).json({ error: 'Usuario no autenticado.' });
+      return;
+    }
+
+    const sellerProfile = await req.prisma.sellerProfile.findUnique({
+      where: { user_id: userId },
+      select: { id: true }
+    });
+
+    if (!sellerProfile) {
+      res.status(404).json({ error: 'Perfil de vendedor no encontrado.' });
+      return;
+    }
+
+    const payouts = await req.prisma.payout.findMany({
+      where: { seller_id: sellerProfile.id },
+      orderBy: { created_at: 'desc' },
+      include: {
+        _count: {
+          select: { commissions: true }
+        }
+      }
+    });
+
+    const formattedPayouts = payouts.map((p) => ({
+      id: p.id,
+      total_amount: Number(p.total_amount),
+      transaction_ref: p.transaction_ref,
+      status: p.status,
+      commissions_count: p._count.commissions,
+      created_at: p.created_at
+    }));
+
+    res.status(200).json({ data: formattedPayouts });
+  } catch (error) {
+    console.error('[Commissions] Error al obtener liquidaciones del vendedor:', error);
+    res.status(500).json({ error: 'Error interno al consultar tu historial de pagos.' });
   }
 };

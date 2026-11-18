@@ -1,6 +1,7 @@
 info:
   name: Crear seller
   type: http
+  seq: 1
 
 http:
   method: POST
@@ -9,7 +10,7 @@ http:
     type: json
     data: |-
       {
-        "email": "vendedor1@test.com",
+        "email": "vendedor@test.com",
         "first_name": "Luis",
         "last_name": "Paz",
         "cbu_alias": "luis.mp"
