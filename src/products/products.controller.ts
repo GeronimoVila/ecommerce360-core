@@ -313,14 +313,15 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    const userRole = (req as any).user?.role;
+    const userRole = req.user?.role;
+    const db = req.prisma || prismaGlobal;
 
     const whereClause: Prisma.ProductWhereInput = { id };
     if (userRole !== 'ADMIN' && userRole !== 'SELLER') {
       whereClause.is_active = true;
     }
 
-    const product = await req.prisma.product.findFirst({
+    const product = await db.product.findFirst({
       where: whereClause,
       include: {
         category: { select: CATEGORY_SELECT },

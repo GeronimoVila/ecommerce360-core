@@ -26,7 +26,7 @@ router.get('/restock/all', requireAuth(['ADMIN']), getSupplierPurchases);
 router.post('/combos', requireAuth(['ADMIN']), createCombo);
 router.patch('/combos/:id', requireAuth(['ADMIN']), updateCombo);
 router.post('/', requireAuth(['ADMIN']), createProduct);
-router.get('/:id', getProductById);
+router.get('/:id', requireAuth(['ADMIN', 'SELLER']), getProductById);
 router.patch('/:id', requireAuth(['ADMIN']), updateProduct);
 router.delete('/:id', requireAuth(['ADMIN']), deactivateProduct);
 router.patch('/:id/restore', requireAuth(['ADMIN']), reactivateProduct);

@@ -69,23 +69,39 @@ export const getNetRevenue = async (req: Request, res: Response): Promise<Respon
 export const getSellersDebt = async (req: Request, res: Response): Promise<Response> => {
   try {
     const cacheKey = 'admin:metrics:sellers-debt';
-    
+
     const cachedData = await RedisService.get(cacheKey);
     if (cachedData) {
       return res.status(200).json({ status: 'success', data: JSON.parse(cachedData) });
     }
 
-    const debtAggregation = await prisma.commissionLedger.aggregate({
-      _sum: { amount: true },
-      where: {
-        status: CommissionStatus.AVAILABLE 
-      }
-    });
+    const [availableAgg, pendingClearanceAgg] = await Promise.all([
+      prisma.commissionLedger.aggregate({
+        _sum: { amount: true },
+        _count: { id: true },
+        where: { status: CommissionStatus.AVAILABLE }
+      }),
+      prisma.commissionLedger.aggregate({
+        _sum: { amount: true },
+        _count: { id: true },
+        where: { status: CommissionStatus.PENDING_CLEARANCE }
+      })
+    ]);
 
-    const pendingCommissions = Number(debtAggregation._sum.amount || 0);
+    const pendingCommissions = Number(availableAgg._sum.amount || 0);
+    const pendingClearanceCommissions = Number(pendingClearanceAgg._sum.amount || 0);
+    const totalUnpaidDebt = pendingCommissions + pendingClearanceCommissions;
+    const pendingSharePercentage =
+      totalUnpaidDebt > 0
+        ? Number(((pendingClearanceCommissions / totalUnpaidDebt) * 100).toFixed(1))
+        : 0;
 
     const payload = {
       pendingCommissions,
+      pendingClearanceCommissions,
+      pendingSharePercentage,
+      availableCount: availableAgg._count.id,
+      pendingClearanceCount: pendingClearanceAgg._count.id,
       currency: 'ARS',
       lastUpdated: new Date().toISOString()
     };
@@ -93,7 +109,6 @@ export const getSellersDebt = async (req: Request, res: Response): Promise<Respo
     await RedisService.set(cacheKey, JSON.stringify(payload), 300);
 
     return res.status(200).json({ status: 'success', data: payload });
-
   } catch (error) {
     console.error('[Dashboard] Error calculando Deuda a Vendedores:', error);
     return res.status(500).json({ error: 'Error interno calculando deuda.' });
