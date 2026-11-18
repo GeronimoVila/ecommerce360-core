@@ -50,6 +50,7 @@ model User {
 
   customer_profile CustomerProfile?
   seller_profile   SellerProfile?
+  refresh_tokens   RefreshToken[]
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
@@ -355,4 +356,21 @@ model ProductImage {
   @@index([product_id, position])
   @@index([is_committed, created_at])
   @@map("product_images")
+}
+
+model RefreshToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  user_id     String    @db.Uuid
+  token_hash  String    @unique
+  remember_me Boolean   @default(false)
+  user_agent  String?
+  expires_at  DateTime
+  revoked_at  DateTime?
+  created_at  DateTime  @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([expires_at])
+  @@map("refresh_tokens")
 }
