@@ -74,3 +74,47 @@ export const getMySales = async (req: Request, res: Response): Promise<void> => 
         res.status(500).json({ error: 'Fallo interno al consultar las ventas.' });
     }
 };
+
+const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+export const getOrderPublicStatus = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const id = req.params.id as string;
+
+        if (!UUID_REGEX.test(id)) {
+            res.status(400).json({ error: 'Identificador de orden inválido.' });
+            return;
+        }
+
+        const order = await prismaGlobal.order.findUnique({
+            where: { id },
+            select: {
+                id: true,
+                status: true,
+                payment_method: true,
+                total_amount: true,
+                created_at: true,
+                _count: {
+                    select: { items: true }
+                }
+            }
+        });
+
+        if (!order) {
+            res.status(404).json({ error: 'Orden no encontrada.' });
+            return;
+        }
+
+        res.status(200).json({
+            id: order.id,
+            status: order.status,
+            payment_method: order.payment_method,
+            total_amount: Number(order.total_amount),
+            items_count: order._count.items,
+            created_at: order.created_at
+        });
+    } catch (error: any) {
+        console.error('[OrdersController.getOrderPublicStatus] Error:', error.message);
+        res.status(500).json({ error: 'Error interno al verificar el estado de la orden.' });
+    }
+};

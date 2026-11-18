@@ -212,6 +212,8 @@ export async function generateMobbexSessionForOrder(orderId: string) {
   const customerFullName =
     [order.customer?.first_name, order.customer?.last_name].filter(Boolean).join(' ') || 'Cliente Ecommerce 360';
 
+  const baseWebhookUrl = (process.env.WEBHOOK_URL || '').trim().replace(/\/$/, '');
+
   const response = await fetch('https://api.mobbex.com/p/checkout', {
     method: 'POST',
     headers: {
@@ -228,8 +230,8 @@ export async function generateMobbexSessionForOrder(orderId: string) {
       description: `Orden #${order.id.slice(0, 8).toUpperCase()} - Ecommerce 360`,
       test: auth.isTest,
       timeout: 15,
-      return_url: `${process.env.WEBHOOK_URL}/api/mobbex/checkout-bridge?orderId=${order.id}`,
-      webhook: `${process.env.WEBHOOK_URL}/api/mobbex/webhook?options=final&internalOrderId=${order.id}`,
+      return_url: `${baseWebhookUrl}/api/mobbex/checkout-bridge?orderId=${order.id}`,
+      webhook: `${baseWebhookUrl}/api/mobbex/webhook?options=final&internalOrderId=${order.id}`,
       customer: {
         email: customerEmail,
         name: customerFullName,
@@ -255,7 +257,7 @@ export async function generateMobbexSessionForOrder(orderId: string) {
         data: { gateway_txn_id: mockId, payment_method: 'MOBBEX' },
       });
       return {
-        checkoutUrl: `${process.env.WEBHOOK_URL}/api/mobbex/mock-gateway?orderId=${order.id}&total=${orderTotal}`,
+        checkoutUrl: `${baseWebhookUrl}/api/mobbex/mock-gateway?orderId=${order.id}&total=${orderTotal}`,
         checkoutId: mockId,
         orderId: order.id,
         amountCharged: orderTotal,
@@ -340,8 +342,11 @@ export const createMobbexCheckout = async (req: Request, res: Response): Promise
 
 export const mobbexCheckoutBridge = (req: Request, res: Response): void => {
   const { orderId, status } = req.query;
+  const frontendUrl = (process.env.FRONTEND_B2C_URL || 'http://localhost:3000').trim().replace(/\/$/, '');
+  const outcome = status === '200' || status === 'approved' ? 'approved' : String(status || 'returned');
+
   res.redirect(
-    `${process.env.FRONTEND_B2C_URL}/checkout/result?orderId=${orderId || ''}&status=${status || 'returned'}`
+    `${frontendUrl}/checkout/success?orderId=${encodeURIComponent(String(orderId || ''))}&gateway=MOBBEX&outcome=${encodeURIComponent(outcome)}`
   );
 };
 
@@ -350,8 +355,10 @@ export const simulateMobbexGateway = async (req: Request, res: Response): Promis
   const statusCode = action === 'reject' ? '400' : '200';
   const statusText = action === 'reject' ? 'Rechazada (Simulación)' : 'Aprobada (Simulación)';
   const numericTotal = Number(total || 0);
+  const baseWebhookUrl = (process.env.WEBHOOK_URL || '').trim().replace(/\/$/, '');
+  const frontendUrl = (process.env.FRONTEND_B2C_URL || 'http://localhost:3000').trim().replace(/\/$/, '');
 
-  await fetch(`${process.env.WEBHOOK_URL}/api/mobbex/webhook?options=final&internalOrderId=${orderId}`, {
+  await fetch(`${baseWebhookUrl}/api/mobbex/webhook?options=final&internalOrderId=${orderId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -367,7 +374,10 @@ export const simulateMobbexGateway = async (req: Request, res: Response): Promis
     }),
   });
 
-  res.redirect(`${process.env.FRONTEND_B2C_URL}/checkout/result?orderId=${orderId}&simulated=true`);
+  const outcome = action === 'reject' ? 'failure' : 'approved';
+  res.redirect(
+    `${frontendUrl}/checkout/success?orderId=${encodeURIComponent(String(orderId || ''))}&gateway=MOBBEX&outcome=${outcome}&simulated=true`
+  );
 };
 
 export const handleMobbexWebhook = async (req: Request, res: Response): Promise<void> => {

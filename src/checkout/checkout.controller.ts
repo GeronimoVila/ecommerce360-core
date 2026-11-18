@@ -258,3 +258,22 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
         return res.status(500).send('Internal Server Error');
     }
 };
+
+export const mpCheckoutBridge = (req: Request, res: Response): void => {
+    const frontendUrl = (process.env.FRONTEND_B2C_URL || 'http://localhost:3000').trim().replace(/\/$/, '');
+    const params = new URLSearchParams();
+
+    Object.entries(req.query).forEach(([key, value]) => {
+        if (typeof value === 'string') {
+            params.set(key, value);
+        } else if (Array.isArray(value) && typeof value[0] === 'string') {
+            params.set(key, value[0]);
+        }
+    });
+
+    if (!params.has('gateway')) {
+        params.set('gateway', 'MP');
+    }
+
+    res.redirect(`${frontendUrl}/checkout/success?${params.toString()}`);
+};

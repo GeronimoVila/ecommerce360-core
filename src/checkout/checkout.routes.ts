@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createCheckoutIntent, receiveMpWebhook } from './checkout.controller';
+import { createCheckoutIntent, receiveMpWebhook, mpCheckoutBridge } from './checkout.controller';
 import { syncCart, validateCoupon } from './cart.controller';
 import { requireAuth } from '../common/guards/auth.guard';
 
@@ -9,5 +9,6 @@ router.post('/intent', requireAuth(['CUSTOMER']), createCheckoutIntent);
 router.post('/cart/sync', syncCart);
 router.post('/coupons/validate', validateCoupon);
 router.post('/webhook/mp', receiveMpWebhook);
+router.get('/mp-bridge', mpCheckoutBridge);
 
 export default router;

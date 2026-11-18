@@ -16,12 +16,21 @@ export const createMpPreference = async (orderId: string, items: MpItem[], custo
     try {
         const preference = new Preference(mpClient);
 
-        const rawFrontendUrl = process.env.FRONTEND_B2C_URL?.trim();
-        const baseUrl = (rawFrontendUrl && rawFrontendUrl.startsWith('http')) 
+        const rawFrontendUrl = process.env.FRONTEND_B2C_URL?.trim().replace(/\/$/, '');
+        const frontendUrl = (rawFrontendUrl && rawFrontendUrl.startsWith('http')) 
             ? rawFrontendUrl 
             : 'http://localhost:3000';
 
-        const isLocalhost = baseUrl.includes('localhost') || baseUrl.includes('127.0.0.1');
+        const rawWebhookUrl = process.env.WEBHOOK_URL?.trim().replace(/\/$/, '');
+        const hasPublicWebhook = Boolean(rawWebhookUrl && rawWebhookUrl.startsWith('https://'));
+        const isFrontendLocal = frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1');
+
+        // Si el frontend es localhost, usamos el bridge HTTPS del backend para que MP muestre "Volver al sitio"
+        const returnEntrypoint = (isFrontendLocal && hasPublicWebhook)
+            ? `${rawWebhookUrl}/api/v1/checkout/mp-bridge`
+            : `${frontendUrl}/checkout/success`;
+
+        const returnBaseUrl = `${returnEntrypoint}?orderId=${encodeURIComponent(orderId)}&gateway=MP`;
 
         const body: any = {
             items: items.map(item => ({
@@ -35,20 +44,20 @@ export const createMpPreference = async (orderId: string, items: MpItem[], custo
                 email: customerEmail || 'guest@ecommerce.com',
             },
             back_urls: {
-                success: `${baseUrl}/checkout/success`,
-                failure: `${baseUrl}/checkout/failure`,
-                pending: `${baseUrl}/checkout/pending`
+                success: `${returnBaseUrl}&outcome=approved`,
+                failure: `${returnBaseUrl}&outcome=failure`,
+                pending: `${returnBaseUrl}&outcome=pending`
             },
             external_reference: String(orderId)
         };
 
-        if (!isLocalhost) {
+        // Al pasar una URL HTTPS pública (el bridge o producción), MP habilita botón + auto_return
+        if (returnEntrypoint.startsWith('https://')) {
             body.auto_return = 'approved';
         }
 
-        if (process.env.WEBHOOK_URL && process.env.WEBHOOK_URL.startsWith('http')) {
-            const baseWebhookUrl = process.env.WEBHOOK_URL.replace(/\/$/, '');
-            body.notification_url = `${baseWebhookUrl}/api/v1/checkout/budget/webhook/mp`;
+        if (rawWebhookUrl && rawWebhookUrl.startsWith('http')) {
+            body.notification_url = `${rawWebhookUrl}/api/v1/checkout/budget/webhook/mp`;
         }
 
         const result = await preference.create({ body });
