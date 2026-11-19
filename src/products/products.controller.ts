@@ -23,6 +23,83 @@ const PRODUCT_IMAGES_SELECT = {
   is_primary: true
 };
 
+async function validateUniqueProductFields(
+  prismaClient: any,
+  params: { sku?: string; name?: string; excludeId?: string }
+): Promise<{ valid: boolean; field?: 'sku' | 'name'; error?: string }> {
+  const { sku, name, excludeId } = params;
+
+  if (sku !== undefined) {
+    const normalizedSku = sku.trim().toUpperCase();
+    if (!normalizedSku) {
+      return { valid: false, field: 'sku', error: 'El SKU es obligatorio.' };
+    }
+
+    const duplicateSku = await prismaClient.product.findFirst({
+      where: {
+        sku: { equals: normalizedSku, mode: 'insensitive' },
+        ...(excludeId ? { id: { not: excludeId } } : {})
+      },
+      select: { id: true }
+    });
+
+    if (duplicateSku) {
+      return {
+        valid: false,
+        field: 'sku',
+        error: `El SKU "${normalizedSku}" ya está asignado a otro producto o combo.`
+      };
+    }
+  }
+
+  if (name !== undefined) {
+    const normalizedName = name.trim();
+    if (!normalizedName) {
+      return { valid: false, field: 'name', error: 'El nombre del producto es obligatorio.' };
+    }
+
+    const duplicateName = await prismaClient.product.findFirst({
+      where: {
+        name: { equals: normalizedName, mode: 'insensitive' },
+        ...(excludeId ? { id: { not: excludeId } } : {})
+      },
+      select: { id: true }
+    });
+
+    if (duplicateName) {
+      return {
+        valid: false,
+        field: 'name',
+        error: `Ya existe un producto o combo registrado con el nombre "${normalizedName}".`
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+function handlePrismaUniqueError(error: any, res: Response): boolean {
+  if (error?.code !== 'P2002') return false;
+
+  const target = Array.isArray(error.meta?.target)
+    ? error.meta.target.join(',').toLowerCase()
+    : String(error.meta?.target || error.message || '').toLowerCase();
+
+  if (target.includes('name')) {
+    res.status(409).json({
+      field: 'name',
+      error: 'Ya existe otro producto o combo con ese nombre en el catálogo.'
+    });
+    return true;
+  }
+
+  res.status(409).json({
+    field: 'sku',
+    error: 'El SKU ingresado ya existe en el catálogo.'
+  });
+  return true;
+}
+
 async function validateLeafCategory(
   prismaClient: any,
   categoryId?: string
@@ -102,6 +179,18 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
       category_id
     } = req.body;
 
+    const normalizedSku = String(sku || '').trim().toUpperCase();
+    const normalizedName = String(name || '').trim();
+
+    const uniqueCheck = await validateUniqueProductFields(req.prisma, {
+      sku: normalizedSku,
+      name: normalizedName
+    });
+    if (!uniqueCheck.valid) {
+      res.status(409).json({ error: uniqueCheck.error, field: uniqueCheck.field });
+      return;
+    }
+
     const categoryCheck = await validateLeafCategory(req.prisma, category_id);
     if (!categoryCheck.valid) {
       res.status(400).json({ error: categoryCheck.error });
@@ -117,8 +206,8 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
 
     const newProduct = await req.prisma.product.create({
       data: {
-        sku: sku.toUpperCase(),
-        name,
+        sku: normalizedSku,
+        name: normalizedName,
         purchase_cost: new Prisma.Decimal(cost),
         vat_rate: new Prisma.Decimal(vat_rate),
         profit_margin: new Prisma.Decimal(profit_margin),
@@ -143,10 +232,7 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
       product: newProduct
     });
   } catch (error: any) {
-    if (error.code === 'P2002') {
-      res.status(409).json({ error: 'El SKU ingresado ya existe en el catálogo.' });
-      return;
-    }
+    if (handlePrismaUniqueError(error, res)) return;
     console.error('[ProductsController] Error en createProduct:', error);
     res.status(500).json({ error: 'Error interno al crear el producto' });
   }
@@ -173,10 +259,23 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
+    const normalizedSku = sku !== undefined ? String(sku).trim().toUpperCase() : undefined;
+    const normalizedName = name !== undefined ? String(name).trim() : undefined;
+
+    const uniqueCheck = await validateUniqueProductFields(req.prisma, {
+      sku: normalizedSku,
+      name: normalizedName,
+      excludeId: id
+    });
+    if (!uniqueCheck.valid) {
+      res.status(409).json({ error: uniqueCheck.error, field: uniqueCheck.field });
+      return;
+    }
+
     const dataToUpdate: Prisma.ProductUpdateInput = {};
 
-    if (sku !== undefined) dataToUpdate.sku = String(sku).toUpperCase();
-    if (name !== undefined) dataToUpdate.name = name;
+    if (normalizedSku !== undefined) dataToUpdate.sku = normalizedSku;
+    if (normalizedName !== undefined) dataToUpdate.name = normalizedName;
     if (is_active !== undefined) dataToUpdate.is_active = Boolean(is_active);
 
     if (category_id !== undefined) {
@@ -222,10 +321,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
       product: updatedProduct
     });
   } catch (error: any) {
-    if (error.code === 'P2002') {
-      res.status(409).json({ error: 'El SKU ya está en uso.' });
-      return;
-    }
+    if (handlePrismaUniqueError(error, res)) return;
     console.error('[ProductsController] Error en updateProduct:', error);
     res.status(500).json({ error: 'Error interno al actualizar el producto' });
   }
@@ -425,6 +521,18 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
       parts
     } = req.body;
 
+    const normalizedSku = String(sku || '').trim().toUpperCase();
+    const normalizedName = String(name || '').trim();
+
+    const uniqueCheck = await validateUniqueProductFields(req.prisma, {
+      sku: normalizedSku,
+      name: normalizedName
+    });
+    if (!uniqueCheck.valid) {
+      res.status(409).json({ error: uniqueCheck.error, field: uniqueCheck.field });
+      return;
+    }
+
     const categoryCheck = await validateLeafCategory(req.prisma, category_id);
     if (!categoryCheck.valid) {
       res.status(400).json({ error: categoryCheck.error });
@@ -487,8 +595,8 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
     const newCombo = await req.prisma.$transaction(async (tx) => {
       return await tx.product.create({
         data: {
-          sku: sku.toUpperCase(),
-          name,
+          sku: normalizedSku,
+          name: normalizedName,
           base_price: new Prisma.Decimal(base_price),
           purchase_cost: new Prisma.Decimal(0),
           vat_rate: new Prisma.Decimal(0),
@@ -542,10 +650,7 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
       }
     });
   } catch (error: any) {
-    if (error.code === 'P2002') {
-      res.status(409).json({ error: 'El SKU ingresado para el combo ya existe en el catálogo.' });
-      return;
-    }
+    if (handlePrismaUniqueError(error, res)) return;
     console.error('[ProductsController] Error en createCombo:', error);
     res.status(500).json({ error: 'Error interno al crear el combo' });
   }
@@ -554,7 +659,7 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
 export const updateCombo = async (req: Request, res: Response): Promise<void> => {
   try {
     const comboId = req.params.id as string;
-    const { name, base_price, commission_rate, category_id, parts } = req.body;
+    const { sku, name, base_price, commission_rate, category_id, parts } = req.body;
 
     if (!parts || !Array.isArray(parts) || parts.length === 0) {
       res.status(400).json({ error: 'Un combo debe contener al menos un componente.' });
@@ -568,6 +673,19 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
 
     if (!existingCombo || !existingCombo.is_combo) {
       res.status(404).json({ error: 'Combo no encontrado o el ID pertenece a un producto simple.' });
+      return;
+    }
+
+    const normalizedSku = sku !== undefined ? String(sku).trim().toUpperCase() : undefined;
+    const normalizedName = name !== undefined ? String(name).trim() : undefined;
+
+    const uniqueCheck = await validateUniqueProductFields(req.prisma, {
+      sku: normalizedSku,
+      name: normalizedName,
+      excludeId: comboId
+    });
+    if (!uniqueCheck.valid) {
+      res.status(409).json({ error: uniqueCheck.error, field: uniqueCheck.field });
       return;
     }
 
@@ -627,7 +745,8 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
       return await tx.product.update({
         where: { id: comboId },
         data: {
-          ...(name !== undefined && { name }),
+          ...(normalizedSku !== undefined && { sku: normalizedSku }),
+          ...(normalizedName !== undefined && { name: normalizedName }),
           ...(base_price !== undefined && { base_price: new Prisma.Decimal(base_price) }),
           ...(commission_rate !== undefined && { commission_rate: new Prisma.Decimal(commission_rate) }),
           ...(category_id !== undefined && { category_id }),
@@ -672,6 +791,7 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
       }
     });
   } catch (error: any) {
+    if (handlePrismaUniqueError(error, res)) return;
     console.error('[ProductsController] Error en updateCombo:', error);
     res.status(500).json({ error: 'Error interno al actualizar el combo' });
   }

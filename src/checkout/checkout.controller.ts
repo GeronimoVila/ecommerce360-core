@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
 import { prismaGlobal } from '../config/prisma';
 import { MercadoPagoConfig, Payment } from 'mercadopago';
 import { createMpPreference } from './mercadopago.service';
@@ -17,6 +18,38 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
 
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: 'El carrito no puede estar vacío.' });
+        }
+
+        let resolvedCustomerProfileId: string | null = null;
+        let rawToken = req.cookies?.access_token;
+        if (!rawToken && req.headers.authorization?.startsWith('Bearer ')) {
+            rawToken = req.headers.authorization.split(' ')[1];
+        }
+
+        if (rawToken) {
+            try {
+                const decoded = jwt.verify(rawToken, process.env.JWT_SECRET!) as { sub?: string };
+                if (decoded?.sub) {
+                    const customerProfile = await prismaGlobal.customerProfile.findUnique({
+                        where: { user_id: decoded.sub },
+                        select: { id: true }
+                    });
+                    if (customerProfile) {
+                        resolvedCustomerProfileId = customerProfile.id;
+                    }
+                }
+            } catch {
+            }
+        }
+
+        if (!resolvedCustomerProfileId && typeof customerId === 'string' && customerId.trim() !== '') {
+            const fallbackProfile = await prismaGlobal.customerProfile.findFirst({
+                where: {
+                    OR: [{ id: customerId }, { user_id: customerId }]
+                },
+                select: { id: true }
+            });
+            resolvedCustomerProfileId = fallbackProfile?.id || null;
         }
 
         const sellerIdCookie = req.cookies.seller_attribution || null;
@@ -46,19 +79,19 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
 
         const productIds = items.map((i: { productId: string }) => i.productId);
         const dbProducts = await prismaGlobal.product.findMany({
-        where: {
-            id: { in: productIds },
-            is_active: true
-        },
-        include: {
-            category: {
-            select: { id: true, path: true }
+            where: {
+                id: { in: productIds },
+                is_active: true
+            },
+            include: {
+                category: {
+                    select: { id: true, path: true }
+                }
             }
-        }
         });
 
         const activeRules = await RedisService.getActivePaymentRules();
-        const pricedProducts = PricingEngine.applyDynamicPricing(dbProducts, activeRules);
+        PricingEngine.applyDynamicPricing(dbProducts, activeRules);
 
         if (dbProducts.length !== items.length) {
             return res.status(400).json({ error: 'Uno o más productos del carrito no existen o están inactivos.' });
@@ -84,7 +117,7 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
         const draftOrder = await prismaGlobal.$transaction(async (tx) => {
             return await tx.order.create({
                 data: {
-                    customer_id: customerId || null,
+                    customer_id: resolvedCustomerProfileId,
                     seller_id: validSellerId,
                     status: 'PENDING',
                     total_amount: totalAmount,

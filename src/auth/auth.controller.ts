@@ -33,6 +33,7 @@ const issueAuthCookies = (
     httpOnly: true,
     secure: isProd,
     sameSite: 'lax',
+    path: '/',
     maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
   });
 
@@ -40,7 +41,7 @@ const issueAuthCookies = (
     httpOnly: true,
     secure: isProd,
     sameSite: 'lax',
-    path: '/api/v1/auth',
+    path: '/',
     ...(rememberMe ? { maxAge: ETERNAL_SLIDING_MS } : {}),
   });
 
@@ -118,15 +119,15 @@ export const refreshSession = async (req: Request, res: Response): Promise<void>
         data: { revoked_at: new Date() },
       });
     }
-    res.clearCookie('access_token');
-    res.clearCookie('refresh_token', { path: '/api/v1/auth' });
+    res.clearCookie('access_token', { path: '/' });
+    res.clearCookie('refresh_token', { path: '/' });
     res.status(401).json({ error: 'Sesión inválida o comprometida. Inicia sesión nuevamente.' });
     return;
   }
 
   if (storedToken.expires_at < new Date() || !storedToken.user.is_active) {
-    res.clearCookie('access_token');
-    res.clearCookie('refresh_token', { path: '/api/v1/auth' });
+    res.clearCookie('access_token', { path: '/' });
+    res.clearCookie('refresh_token', { path: '/' });
     res.status(401).json({ error: 'La sesión ha expirado o la cuenta está inactiva.' });
     return;
   }
@@ -179,8 +180,8 @@ export const logout = async (req: Request, res: Response): Promise<void> => {
     });
   }
 
-  res.clearCookie('access_token');
-  res.clearCookie('refresh_token', { path: '/api/v1/auth' });
+  res.clearCookie('access_token', { path: '/' });
+  res.clearCookie('refresh_token', { path: '/' });
   res.json({ message: 'Logout exitoso' });
 };
 
