@@ -7,6 +7,29 @@ import { PricingEngine } from '../products/pricing.engine';
 
 const BUDGET_EXPIRATION_HOURS = 48;
 
+function getAvailableStockForProduct(product: {
+  is_combo: boolean;
+  physical_stock: number;
+  combo_parts?: Array<{
+    quantity: number;
+    product: { physical_stock: number };
+  }>;
+}): number {
+  if (!product.is_combo) {
+    return product.physical_stock;
+  }
+
+  if (!product.combo_parts || product.combo_parts.length === 0) {
+    return 0;
+  }
+
+  const maxAssemblies = product.combo_parts.map((part) =>
+    part.quantity > 0 ? Math.floor(part.product.physical_stock / part.quantity) : 0
+  );
+
+  return Math.min(...maxAssemblies);
+}
+
 export const createBudget = async (req: Request, res: Response): Promise<Response | void> => {
   try {
     const userId = req.user?.sub;
@@ -54,35 +77,56 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
     const dbProducts = await prismaGlobal.product.findMany({
       where: {
         id: { in: productIds },
-        is_active: true
+        is_active: true,
       },
       include: {
         category: {
-          select: { id: true, path: true }
-        }
-      }
+          select: { id: true, path: true },
+        },
+        combo_parts: {
+          include: {
+            product: {
+              select: { physical_stock: true },
+            },
+          },
+        },
+      },
     });
 
     const activeRules = await RedisService.getActivePaymentRules();
-    const pricedProducts = PricingEngine.applyDynamicPricing(dbProducts, activeRules);
+    PricingEngine.applyDynamicPricing(dbProducts, activeRules);
 
     if (dbProducts.length !== items.length) {
       return res.status(400).json({ error: 'Discrepancia en catálogo: Productos inactivos o inexistentes.' });
     }
 
+    for (const frontendItem of items) {
+      const dbProduct = dbProducts.find((p) => p.id === frontendItem.productId)!;
+      const available = getAvailableStockForProduct(dbProduct);
+      const requestedQty = Number(frontendItem.quantity);
+
+      if (available < requestedQty) {
+        return res.status(409).json({
+          error: 'Quiebre de stock.',
+          details: `Stock insuficiente para "${dbProduct.name}" (disponible: ${available}, solicitado: ${requestedQty}).`,
+        });
+      }
+    }
+
     let totalAmount = 0;
     const orderItemsToCreate = items.map((frontendItem: any) => {
-      const dbProduct = dbProducts.find((p) => p.id === frontendItem.productId);
-      const unitPrice = Number(dbProduct!.base_price);
+      const dbProduct = dbProducts.find((p) => p.id === frontendItem.productId)!;
+      const unitPrice = Number(dbProduct.base_price);
       const quantity = Number(frontendItem.quantity);
 
       totalAmount += unitPrice * quantity;
 
       return {
-        product_id: dbProduct!.id,
-        quantity: quantity,
+        product_id: dbProduct.id,
+        quantity,
         unit_price: unitPrice,
         pure_base_price: unitPrice,
+        applied_commission_rate: Number(dbProduct.commission_rate || 0),
       };
     });
 
@@ -114,16 +158,64 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
 
 export const payBudget = async (req: Request<{ id: string }>, res: Response): Promise<Response | void> => {
   try {
+    const userId = req.user?.sub;
+    if (!userId) {
+      return res.status(401).json({ error: 'Debes iniciar sesión como cliente para abonar este presupuesto.' });
+    }
+
+    const customerProfile = await prismaGlobal.customerProfile.findUnique({
+      where: { user_id: userId },
+      select: { id: true, user_id: true },
+    });
+
+    if (!customerProfile) {
+      return res.status(403).json({
+        error: 'Perfil de cliente no encontrado.',
+        details: 'Solo las cuentas con rol de cliente pueden abonar presupuestos.',
+      });
+    }
+
     const id = req.params.id as string;
     const requestedMethod = req.body?.paymentMethod as 'MP' | 'MOBBEX' | 'TRANSFERENCIA' | undefined;
 
     const order = await prismaGlobal.order.findUnique({
-      where: { id: id },
-      include: { items: { include: { product: true } } },
+      where: { id },
+      include: {
+        seller: { select: { user_id: true } },
+        items: {
+          include: {
+            product: {
+              include: {
+                combo_parts: {
+                  include: {
+                    product: {
+                      select: { physical_stock: true, name: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     });
 
     if (!order || (order.status !== 'BUDGET' && order.status !== 'PENDING')) {
       return res.status(404).json({ error: 'Presupuesto no encontrado o ya pagado.' });
+    }
+
+    if (order.seller?.user_id && order.seller.user_id === userId) {
+      return res.status(403).json({
+        error: 'Operación no permitida.',
+        details: 'No puedes abonar un presupuesto generado desde tu propia cuenta de vendedor.',
+      });
+    }
+
+    if (order.customer_id && order.customer_id !== customerProfile.id) {
+      return res.status(403).json({
+        error: 'Acceso denegado.',
+        details: 'Este presupuesto fue emitido para otro cliente registrado.',
+      });
     }
 
     const hoursSinceCreation = Math.abs(Date.now() - new Date(order.created_at).getTime()) / 36e5;
@@ -132,10 +224,13 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
     }
 
     for (const item of order.items) {
-      if (item.product && item.product.physical_stock < item.quantity) {
+      if (!item.product) continue;
+      const availableStock = getAvailableStockForProduct(item.product);
+
+      if (availableStock < item.quantity) {
         return res.status(409).json({
           error: 'Quiebre de stock.',
-          details: `Stock insuficiente para el producto: ${item.product.name}`,
+          details: `Stock insuficiente para "${item.product.name}" (disponible: ${availableStock}, requerido: ${item.quantity}).`,
         });
       }
     }
@@ -143,6 +238,13 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
     const activePaymentMethod = requestedMethod || order.payment_method;
     let checkoutUrl = '';
     let gatewayTxnId = '';
+
+    if (!order.customer_id) {
+      await prismaGlobal.order.update({
+        where: { id: order.id },
+        data: { customer_id: customerProfile.id },
+      });
+    }
 
     if (activePaymentMethod === 'MP') {
       const mpItems = order.items.map((i: any) => ({
@@ -160,6 +262,7 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
         where: { id: order.id },
         data: {
           status: 'PENDING',
+          customer_id: customerProfile.id,
           payment_method: 'MP',
           gateway_txn_id: gatewayTxnId,
         },
@@ -173,6 +276,7 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
         where: { id: order.id },
         data: {
           status: 'PENDING',
+          customer_id: customerProfile.id,
           gateway_txn_id: gatewayTxnId,
         },
       });
@@ -191,7 +295,7 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
     console.error('[BudgetController.payBudget] Error:', error);
     return res.status(500).json({
       error: 'Fallo al procesar el pago del presupuesto.',
-      detail: process.env.NODE_ENV !== 'production' ? error?.message : undefined,
+      details: process.env.NODE_ENV !== 'production' ? error?.message : undefined,
     });
   }
 };
@@ -235,49 +339,111 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
   const type = req.query.topic || req.body.type || req.body.action;
   const paymentId = req.query.id || req.body.data?.id;
 
-  if (!paymentId || (type !== 'payment' && type !== 'payment.created')) {
+  if (!paymentId || (type !== 'payment' && type !== 'payment.created' && type !== 'payment.updated')) {
     return res.status(200).send('Evento ignorado');
   }
 
+  const txId = String(paymentId);
+  const lockKey = `lock:mp:budget:tx:${txId}`;
+  const processedKey = `idempotency:mp:budget:tx:${txId}`;
+
+  const alreadyProcessed = await RedisService.get(processedKey);
+  if (alreadyProcessed) {
+    return res.status(200).send('Webhook ya procesado');
+  }
+
+  const acquired = await RedisService.acquireLock(lockKey, 60);
+  if (!acquired) {
+    return res.status(200).send('Procesamiento concurrente en curso');
+  }
+
   try {
-    const paymentData = await getMpPaymentById(paymentId as string);
+    const paymentData = await getMpPaymentById(txId);
 
     if (paymentData.status === 'approved') {
       const orderId = paymentData.external_reference;
-
-      if (!orderId) return res.status(200).send('Pago aprobado pero sin external_reference. Ignorando.');
+      if (!orderId) {
+        return res.status(200).send('Pago aprobado pero sin external_reference. Ignorando.');
+      }
 
       await prismaGlobal.$transaction(async (tx) => {
+        const transitioned = await tx.order.updateMany({
+          where: {
+            id: orderId,
+            status: { in: ['PENDING', 'BUDGET'] },
+          },
+          data: {
+            status: 'PAID',
+            gateway_txn_id: txId,
+          },
+        });
+
+        if (transitioned.count === 0) return;
+
         const order = await tx.order.findUnique({
           where: { id: orderId },
           include: {
-            items: { include: { product: true } },
+            items: {
+              include: {
+                product: {
+                  include: { combo_parts: true },
+                },
+              },
+            },
             seller: { select: { user_id: true } },
             customer: { select: { user_id: true } },
           },
         });
 
-        if (!order || order.status === 'PAID') return;
-
-        await tx.order.update({
-          where: { id: orderId },
-          data: { status: 'PAID' },
-        });
+        if (!order) return;
 
         let totalCommission = 0;
 
         for (const item of order.items) {
-          if (item.product_id) {
-            await tx.product.update({
-              where: { id: item.product_id },
-              data: { physical_stock: { decrement: item.quantity } },
+          if (!item.product_id || !item.product) continue;
+
+          if (item.product.is_combo && item.product.combo_parts.length > 0) {
+            for (const part of item.product.combo_parts) {
+              const requiredQty = part.quantity * item.quantity;
+              const decResult = await tx.product.updateMany({
+                where: {
+                  id: part.product_id,
+                  physical_stock: { gte: requiredQty },
+                },
+                data: {
+                  physical_stock: { decrement: requiredQty },
+                  version: { increment: 1 },
+                },
+              });
+
+              if (decResult.count === 0) {
+                throw new Error(`Stock insuficiente para componente de combo (${part.product_id}).`);
+              }
+            }
+          } else {
+            const decResult = await tx.product.updateMany({
+              where: {
+                id: item.product_id,
+                physical_stock: { gte: item.quantity },
+              },
+              data: {
+                physical_stock: { decrement: item.quantity },
+                version: { increment: 1 },
+              },
             });
 
-            if (item.product && item.product.commission_rate) {
-              const commissionValue =
-                Number(item.unit_price) * item.quantity * (Number(item.product.commission_rate) / 100);
-              totalCommission += commissionValue;
+            if (decResult.count === 0) {
+              throw new Error(`Stock insuficiente para ${item.product.name}. Sobreventa abortada.`);
             }
+          }
+
+          const rate =
+            Number(item.applied_commission_rate) > 0
+              ? Number(item.applied_commission_rate)
+              : Number(item.product.commission_rate || 0);
+
+          if (rate > 0) {
+            totalCommission += Number(item.unit_price) * item.quantity * (rate / 100);
           }
         }
 
@@ -293,7 +459,7 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
               data: {
                 order_id: order.id,
                 seller_id: order.seller_id,
-                amount: totalCommission,
+                amount: Math.round(totalCommission * 100) / 100,
                 status: 'PENDING_CLEARANCE',
                 clearing_date: clearingDate,
               },
@@ -303,11 +469,15 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
           }
         }
       });
+
+      await RedisService.set(processedKey, '1', 86400);
     }
 
     return res.status(200).send('Webhook procesado con éxito');
   } catch (error) {
     console.error('[Webhook Controller] Error crítico procesando Webhook:', error);
     return res.status(500).json({ error: 'Internal Server Error' });
+  } finally {
+    await RedisService.releaseLock(lockKey);
   }
 };

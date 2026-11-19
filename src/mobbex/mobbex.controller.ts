@@ -434,7 +434,13 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
     const order = await prisma.order.findUnique({
       where: { id: internalOrderId },
       include: {
-        items: { include: { product: true } },
+        items: {
+          include: {
+            product: {
+              include: { combo_parts: true },
+            },
+          },
+        },
         seller: { select: { user_id: true } },
         customer: { select: { user_id: true } },
       },
@@ -562,19 +568,39 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
         for (const item of order.items) {
           if (!item.product_id || !item.product) continue;
 
-          const updateResult = await tx.product.updateMany({
-            where: {
-              id: item.product_id,
-              physical_stock: { gte: item.quantity },
-            },
-            data: {
-              physical_stock: { decrement: item.quantity },
-              version: { increment: 1 },
-            },
-          });
+          if (item.product.is_combo && item.product.combo_parts.length > 0) {
+            for (const part of item.product.combo_parts) {
+              const requiredQty = part.quantity * item.quantity;
+              const updateResult = await tx.product.updateMany({
+                where: {
+                  id: part.product_id,
+                  physical_stock: { gte: requiredQty },
+                },
+                data: {
+                  physical_stock: { decrement: requiredQty },
+                  version: { increment: 1 },
+                },
+              });
 
-          if (updateResult.count === 0) {
-            throw new Error(`Stock insuficiente para ${item.product.name}. Sobreventa abortada.`);
+              if (updateResult.count === 0) {
+                throw new Error(`Stock insuficiente para componente del combo ${item.product.name}. Sobreventa abortada.`);
+              }
+            }
+          } else {
+            const updateResult = await tx.product.updateMany({
+              where: {
+                id: item.product_id,
+                physical_stock: { gte: item.quantity },
+              },
+              data: {
+                physical_stock: { decrement: item.quantity },
+                version: { increment: 1 },
+              },
+            });
+
+            if (updateResult.count === 0) {
+              throw new Error(`Stock insuficiente para ${item.product.name}. Sobreventa abortada.`);
+            }
           }
 
           const itemTotal = Number(item.unit_price) * item.quantity;
@@ -645,14 +671,27 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
 
         if (order.status === 'PAID') {
           for (const item of order.items) {
-            if (!item.product_id) continue;
-            await tx.product.update({
-              where: { id: item.product_id },
-              data: {
-                physical_stock: { increment: item.quantity },
-                version: { increment: 1 },
-              },
-            });
+            if (!item.product_id || !item.product) continue;
+
+            if (item.product.is_combo && item.product.combo_parts.length > 0) {
+              for (const part of item.product.combo_parts) {
+                await tx.product.update({
+                  where: { id: part.product_id },
+                  data: {
+                    physical_stock: { increment: part.quantity * item.quantity },
+                    version: { increment: 1 },
+                  },
+                });
+              }
+            } else {
+              await tx.product.update({
+                where: { id: item.product_id },
+                data: {
+                  physical_stock: { increment: item.quantity },
+                  version: { increment: 1 },
+                },
+              });
+            }
           }
 
           await tx.order.update({

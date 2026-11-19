@@ -86,6 +86,11 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             include: {
                 category: {
                     select: { id: true, path: true }
+                },
+                combo_parts: {
+                    include: {
+                        product: { select: { physical_stock: true } }
+                    }
                 }
             }
         });
@@ -97,20 +102,37 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             return res.status(400).json({ error: 'Uno o más productos del carrito no existen o están inactivos.' });
         }
 
+        for (const frontendItem of items) {
+            const dbProduct = dbProducts.find(p => p.id === frontendItem.productId)!;
+            const requestedQty = Number(frontendItem.quantity);
+            const availableStock = dbProduct.is_combo
+                ? (dbProduct.combo_parts.length > 0
+                    ? Math.min(...dbProduct.combo_parts.map(part => Math.floor(part.product.physical_stock / part.quantity)))
+                    : 0)
+                : dbProduct.physical_stock;
+
+            if (availableStock < requestedQty) {
+                return res.status(409).json({
+                    error: 'Quiebre de stock.',
+                    details: `Stock insuficiente para "${dbProduct.name}" (disponible: ${availableStock}, solicitado: ${requestedQty}).`
+                });
+            }
+        }
+
         let totalAmount = 0;
         const orderItemsToCreate = items.map((frontendItem: any) => {
-            const dbProduct = dbProducts.find(p => p.id === frontendItem.productId);
-            
-            const unitPrice = Number(dbProduct!.base_price); 
+            const dbProduct = dbProducts.find(p => p.id === frontendItem.productId)!;
+            const unitPrice = Number(dbProduct.base_price);
             const quantity = Number(frontendItem.quantity);
-            
+
             totalAmount += (unitPrice * quantity);
 
             return {
-                product_id: dbProduct!.id,
-                quantity: quantity,
+                product_id: dbProduct.id,
+                quantity,
                 unit_price: unitPrice,
-                pure_base_price: unitPrice
+                pure_base_price: unitPrice,
+                applied_commission_rate: Number(dbProduct.commission_rate || 0)
             };
         });
 
@@ -204,10 +226,16 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
 
         const order = await prismaGlobal.order.findUnique({
             where: { id: orderId },
-            include: { 
-                items: { 
-                    include: { product: true } 
-                } 
+            include: {
+                items: {
+                    include: {
+                        product: {
+                            include: { combo_parts: true }
+                        }
+                    }
+                },
+                seller: { select: { user_id: true } },
+                customer: { select: { user_id: true } }
             }
         });
 
@@ -223,7 +251,7 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
         await prismaGlobal.$transaction(async (tx) => {
             const updatedOrder = await tx.order.updateMany({
                 where: { id: orderId, status: 'PENDING' },
-                data: { status: 'PAID' }
+                data: { status: 'PAID', gateway_txn_id: String(paymentId) }
             });
 
             if (updatedOrder.count === 0) {
@@ -235,40 +263,70 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
             for (const item of order.items) {
                 if (!item.product_id || !item.product) continue;
 
-                const updateResult = await tx.product.updateMany({
-                    where: {
-                        id: item.product_id,
-                        physical_stock: { gte: item.quantity },
-                    },
-                    data: {
-                        physical_stock: { decrement: item.quantity },
-                        version: { increment: 1 }
-                    }
-                });
+                if (item.product.is_combo && item.product.combo_parts.length > 0) {
+                    for (const part of item.product.combo_parts) {
+                        const requiredQty = part.quantity * item.quantity;
+                        const updateResult = await tx.product.updateMany({
+                            where: {
+                                id: part.product_id,
+                                physical_stock: { gte: requiredQty }
+                            },
+                            data: {
+                                physical_stock: { decrement: requiredQty },
+                                version: { increment: 1 }
+                            }
+                        });
 
-                if (updateResult.count === 0) {
-                    throw new Error(`Stock insuficiente para el producto ${item.product.name}. Sobreventa abortada.`);
+                        if (updateResult.count === 0) {
+                            throw new Error(`Stock insuficiente para componente del combo ${item.product.name}. Sobreventa abortada.`);
+                        }
+                    }
+                } else {
+                    const updateResult = await tx.product.updateMany({
+                        where: {
+                            id: item.product_id,
+                            physical_stock: { gte: item.quantity }
+                        },
+                        data: {
+                            physical_stock: { decrement: item.quantity },
+                            version: { increment: 1 }
+                        }
+                    });
+
+                    if (updateResult.count === 0) {
+                        throw new Error(`Stock insuficiente para el producto ${item.product.name}. Sobreventa abortada.`);
+                    }
                 }
 
                 const itemTotal = Number(item.unit_price) * item.quantity;
-                const commissionRate = Number(item.product.commission_rate) / 100;
-                totalCommissionAmount += (itemTotal * commissionRate);
+                const rate =
+                    Number(item.applied_commission_rate) > 0
+                        ? Number(item.applied_commission_rate)
+                        : Number(item.product.commission_rate);
+                totalCommissionAmount += itemTotal * (rate / 100);
             }
 
             if (order.seller_id && totalCommissionAmount > 0) {
-                const sanitizedCommission = Math.round(totalCommissionAmount * 100) / 100;
-                const clearingDate = new Date();
-                clearingDate.setDate(clearingDate.getDate() + 15);
+                const isSelfPurchase =
+                    order.seller?.user_id && order.customer?.user_id && order.seller.user_id === order.customer.user_id;
 
-                await tx.commissionLedger.create({
-                    data: {
-                        order_id: orderId,
-                        seller_id: order.seller_id,
-                        amount: sanitizedCommission,
-                        status: 'PENDING_CLEARANCE',
-                        clearing_date: clearingDate
-                    }
-                });
+                if (!isSelfPurchase) {
+                    const sanitizedCommission = Math.round(totalCommissionAmount * 100) / 100;
+                    const clearingDate = new Date();
+                    clearingDate.setDate(clearingDate.getDate() + 15);
+
+                    await tx.commissionLedger.create({
+                        data: {
+                            order_id: orderId,
+                            seller_id: order.seller_id,
+                            amount: sanitizedCommission,
+                            status: 'PENDING_CLEARANCE',
+                            clearing_date: clearingDate
+                        }
+                    });
+                } else {
+                    console.warn(`🛡️ [Fraud Prevented] Auto-compra detectada en Orden ${orderId}.`);
+                }
             }
         });
 
