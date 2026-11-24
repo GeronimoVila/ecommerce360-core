@@ -56,7 +56,7 @@ export const processRestock = async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    const { updatedParts, purchaseRecord } = await req.prisma.$transaction(async (tx) => {
+    const { updatedParts } = await req.prisma.$transaction(async (tx) => {
       
       let supplierId = null;
       if (provider_name) {
@@ -74,7 +74,7 @@ export const processRestock = async (req: Request, res: Response): Promise<void>
         }
       });
 
-      const results = [];
+      const results: Array<{ id: string; sku: string; physical_stock: number }> = [];
       
       for (const item of items) {
         const dbProduct = existingProducts.find(p => p.sku === item.sku.toUpperCase())!;
@@ -82,8 +82,21 @@ export const processRestock = async (req: Request, res: Response): Promise<void>
         const updatedProduct = await tx.product.update({
           where: { id: dbProduct.id },
           data: { physical_stock: { increment: item.quantity } },
-          select: { id: true, sku: true, physical_stock: true }
+          select: {
+            id: true,
+            sku: true,
+            physical_stock: true,
+            low_stock_threshold: true,
+            low_stock_alerted: true
+          }
         });
+
+        if (updatedProduct.low_stock_alerted && updatedProduct.physical_stock > updatedProduct.low_stock_threshold) {
+          await tx.product.update({
+            where: { id: dbProduct.id },
+            data: { low_stock_alerted: false }
+          });
+        }
 
         const stockAfter = updatedProduct.physical_stock;
         const stockBefore = stockAfter - item.quantity;
@@ -98,10 +111,14 @@ export const processRestock = async (req: Request, res: Response): Promise<void>
           }
         });
 
-        results.push(updatedProduct);
+        results.push({
+          id: updatedProduct.id,
+          sku: updatedProduct.sku,
+          physical_stock: updatedProduct.physical_stock
+        });
       }
       
-      return { updatedParts: results, purchaseRecord: purchase };
+      return { updatedParts: results };
     });
 
     const affectedComboIds = new Set<string>();

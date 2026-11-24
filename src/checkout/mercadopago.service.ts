@@ -1,4 +1,6 @@
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
+import { NotificationType } from '@prisma/client';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const mpClient = new MercadoPagoConfig({ 
     accessToken: process.env.MP_ACCESS_TOKEN || '', 
@@ -67,6 +69,20 @@ export const createMpPreference = async (orderId: string, items: MpItem[], custo
         };
     } catch (error: any) {
         console.error('[MP Service] Error detallado:', JSON.stringify(error.cause || error, null, 2));
+
+        await NotificationsService.notifyAdmins({
+            type: NotificationType.INTEGRATION_FAILURE,
+            title: 'Error creando preferencia en Mercado Pago',
+            message: `Fallo al generar checkout de Mercado Pago para la orden #${orderId.slice(0, 8).toUpperCase()}: ${error?.message || 'Error de conexión'}`,
+            actionUrl: '/settings/payments',
+            metadata: {
+                gateway: 'MP',
+                order_id: orderId,
+                error: error?.message || 'Unknown MP error'
+            },
+            baseDedupKey: `mp_pref_err:${orderId}`
+        });
+
         throw new Error('Fallo en la integración con la pasarela de pagos.');
     }
 };
@@ -76,8 +92,22 @@ export const getMpPaymentById = async (paymentId: string | number) => {
         const payment = new Payment(mpClient);
         const result = await payment.get({ id: Number(paymentId) });
         return result;
-    } catch (error) {
+    } catch (error: any) {
         console.error('[MP Service] Error al consultar pago:', error);
+
+        await NotificationsService.notifyAdmins({
+            type: NotificationType.INTEGRATION_FAILURE,
+            title: 'Error consultando pago en Mercado Pago',
+            message: `No se pudo verificar el pago ${paymentId} contra la API de Mercado Pago.`,
+            actionUrl: '/settings/payments',
+            metadata: {
+                gateway: 'MP',
+                payment_id: String(paymentId),
+                error: error?.message || 'Unknown MP error'
+            },
+            baseDedupKey: `mp_get_err:${paymentId}`
+        });
+
         throw new Error('No se pudo verificar la transacción en Mercado Pago.');
     }
 };

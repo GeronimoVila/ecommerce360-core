@@ -1,11 +1,13 @@
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
+import { NotificationType, Role } from '@prisma/client';
 import { prismaGlobal } from '../config/prisma';
 import { MercadoPagoConfig, Payment } from 'mercadopago';
 import { createMpPreference } from './mercadopago.service';
 import { generateMobbexSessionForOrder } from '../mobbex/mobbex.controller';
 import { RedisService } from '../redis/redis.service';
 import { PricingEngine } from '../products/pricing.engine';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const mpClient = new MercadoPagoConfig({ 
     accessToken: process.env.MP_ACCESS_TOKEN || '', 
@@ -21,6 +23,7 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
         }
 
         let resolvedCustomerProfileId: string | null = null;
+        let resolvedCustomerUserId: string | null = null;
         let rawToken = req.cookies?.access_token;
         if (!rawToken && req.headers.authorization?.startsWith('Bearer ')) {
             rawToken = req.headers.authorization.split(' ')[1];
@@ -32,10 +35,11 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 if (decoded?.sub) {
                     const customerProfile = await prismaGlobal.customerProfile.findUnique({
                         where: { user_id: decoded.sub },
-                        select: { id: true }
+                        select: { id: true, user_id: true }
                     });
                     if (customerProfile) {
                         resolvedCustomerProfileId = customerProfile.id;
+                        resolvedCustomerUserId = customerProfile.user_id;
                     }
                 }
             } catch {
@@ -47,9 +51,10 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 where: {
                     OR: [{ id: customerId }, { user_id: customerId }]
                 },
-                select: { id: true }
+                select: { id: true, user_id: true }
             });
             resolvedCustomerProfileId = fallbackProfile?.id || null;
+            resolvedCustomerUserId = fallbackProfile?.user_id || null;
         }
 
         const sellerIdCookie = req.cookies.seller_attribution || null;
@@ -180,6 +185,30 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             gatewayTxnId = mobbexSession.checkoutId;
         }
 
+        if (resolvedCustomerUserId) {
+            const shortOrderId = draftOrder.id.slice(0, 8).toUpperCase();
+            const isTransfer = paymentMethod === 'TRANSFERENCIA';
+
+            await NotificationsService.notify({
+                userId: resolvedCustomerUserId,
+                role: Role.CUSTOMER,
+                type: NotificationType.ORDER_CREATED,
+                title: isTransfer
+                    ? `Pedido #${shortOrderId} recibido (Pendiente de transferencia)`
+                    : `¡Recibimos tu pedido #${shortOrderId}!`,
+                message: isTransfer
+                    ? `Tu orden por $${Number(draftOrder.total_amount).toFixed(2)} fue registrada. Aguardamos la acreditación de tu transferencia para confirmar el pago.`
+                    : `Tu orden por $${Number(draftOrder.total_amount).toFixed(2)} está pendiente de confirmación de pago.`,
+                actionUrl: `/orders/${draftOrder.id}`,
+                metadata: {
+                    order_id: draftOrder.id,
+                    total_amount: Number(draftOrder.total_amount),
+                    payment_method: paymentMethod
+                },
+                dedupKey: `order_created:${draftOrder.id}`
+            });
+        }
+
         return res.status(201).json({
             success: true,
             message: "Intención de compra registrada exitosamente.",
@@ -211,16 +240,47 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
     }
 
     try {
-        let orderId: string | undefined;
-
         const paymentInfo = await new Payment(mpClient).get({ id: Number(paymentId) });
-        
+
+        if (paymentInfo.status === 'rejected' || paymentInfo.status === 'cancelled') {
+            const failedOrderId = paymentInfo.external_reference;
+            if (failedOrderId) {
+                const failedOrder = await prismaGlobal.order.findUnique({
+                    where: { id: failedOrderId },
+                    select: {
+                        id: true,
+                        customer: { select: { user_id: true } }
+                    }
+                });
+
+                if (failedOrder?.customer?.user_id) {
+                    await NotificationsService.notify({
+                        userId: failedOrder.customer.user_id,
+                        role: Role.CUSTOMER,
+                        type: NotificationType.PAYMENT_ACTION_REQUIRED,
+                        title: 'Tu pago no pudo procesarse',
+                        message: `El pago de tu pedido #${failedOrder.id.slice(0, 8).toUpperCase()} fue rechazado. Reintenta con otro medio de pago.`,
+                        actionUrl: `/orders/${failedOrder.id}`,
+                        metadata: {
+                            order_id: failedOrder.id,
+                            gateway: 'MP',
+                            payment_id: String(paymentId),
+                            status: paymentInfo.status
+                        },
+                        dedupKey: `mp_payment_failed:${paymentId}`
+                    });
+                }
+            }
+            return res.status(200).send('Pago rechazado notificado');
+        }
+
+        let orderId: string | undefined;
         if (paymentInfo.status === 'approved') {
             orderId = paymentInfo.external_reference;
         }
 
         if (!orderId) {
-            console.warn(`[Webhook MP] Pago ${paymentId} sin orden asociada.`);
+            console.warn(`[Webhook MP] Pago ${paymentId} en estado "${paymentInfo.status}" sin orden para acreditar.`);
             return res.status(200).send('OK');
         }
 
@@ -248,9 +308,12 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
             return res.status(200).send('Orden ya procesada');
         }
 
+        let createdCommissionAmount = 0;
+        const touchedProductIds: string[] = [];
+
         await prismaGlobal.$transaction(async (tx) => {
             const updatedOrder = await tx.order.updateMany({
-                where: { id: orderId, status: 'PENDING' },
+                where: { id: orderId, status: { in: ['PENDING', 'BUDGET'] } },
                 data: { status: 'PAID', gateway_txn_id: String(paymentId) }
             });
 
@@ -280,6 +343,7 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
                         if (updateResult.count === 0) {
                             throw new Error(`Stock insuficiente para componente del combo ${item.product.name}. Sobreventa abortada.`);
                         }
+                        touchedProductIds.push(part.product_id);
                     }
                 } else {
                     const updateResult = await tx.product.updateMany({
@@ -296,6 +360,7 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
                     if (updateResult.count === 0) {
                         throw new Error(`Stock insuficiente para el producto ${item.product.name}. Sobreventa abortada.`);
                     }
+                    touchedProductIds.push(item.product_id);
                 }
 
                 const itemTotal = Number(item.unit_price) * item.quantity;
@@ -324,11 +389,50 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
                             clearing_date: clearingDate
                         }
                     });
+
+                    createdCommissionAmount = sanitizedCommission;
                 } else {
                     console.warn(`🛡️ [Fraud Prevented] Auto-compra detectada en Orden ${orderId}.`);
                 }
             }
         });
+
+        if (order.seller_id && createdCommissionAmount > 0 && order.seller?.user_id) {
+            await NotificationsService.notify({
+                userId: order.seller.user_id,
+                role: Role.SELLER,
+                type: NotificationType.COMMISSION_EARNED,
+                title: `Nueva comisión atribuida: +$${createdCommissionAmount.toFixed(2)}`,
+                message: `Pedido #${order.id.slice(0, 8).toUpperCase()} confirmado. La comisión entra en período de garantía.`,
+                actionUrl: '/commissions',
+                metadata: {
+                    order_id: order.id,
+                    amount: createdCommissionAmount,
+                    gateway: 'MP'
+                },
+                dedupKey: `commission_earned:${order.id}`
+            });
+        }
+
+        if (order.customer?.user_id) {
+            await NotificationsService.notify({
+                userId: order.customer.user_id,
+                role: Role.CUSTOMER,
+                type: NotificationType.ORDER_PAID,
+                title: '¡Pago aprobado!',
+                message: `Confirmamos el pago de tu pedido #${order.id.slice(0, 8).toUpperCase()} por $${Number(order.total_amount).toFixed(2)}. Ya estamos preparando tu compra.`,
+                actionUrl: `/orders/${order.id}`,
+                metadata: {
+                    order_id: order.id,
+                    amount: Number(order.total_amount),
+                    gateway: 'MP',
+                    payment_id: String(paymentId)
+                },
+                dedupKey: `order_paid:${order.id}`
+            });
+        }
+
+        await NotificationsService.checkAndNotifyLowStock(touchedProductIds);
 
         return res.status(200).send('Webhook procesado exitosamente');
 
@@ -346,6 +450,20 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
         }
 
         console.error('❌ [Webhook MP] Error crítico procesando la notificación:', error.message);
+
+        await NotificationsService.notifyAdmins({
+            type: NotificationType.INTEGRATION_FAILURE,
+            title: 'Fallo técnico en webhook Mercado Pago',
+            message: `Error procesando notificación de pago ${paymentId}: ${error.message}`,
+            actionUrl: '/settings/payments',
+            metadata: {
+                gateway: 'MP',
+                payment_id: String(paymentId),
+                error: error.message
+            },
+            baseDedupKey: `mp_webhook_err:${paymentId}`
+        });
+
         return res.status(500).send('Internal Server Error');
     }
 };

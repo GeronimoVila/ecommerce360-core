@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
-import { CommissionStatus } from '@prisma/client';
+import { CommissionStatus, NotificationType, Role } from '@prisma/client';
 import prisma from '../config/prisma';
 import { RedisService } from '../redis/redis.service';
 import { resolveMobbexCredentials, encryptToken } from './mobbexAuth.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const DEFAULT_TENANT = 'DEFAULT_STORE';
 const FALLBACK_MOBBEX_IMAGE = 'https://via.placeholder.com/150';
@@ -290,6 +291,20 @@ export async function generateMobbexSessionForOrder(orderId: string) {
       };
     }
 
+    await NotificationsService.notifyAdmins({
+      type: NotificationType.INTEGRATION_FAILURE,
+      title: 'Error creando checkout en Mobbex',
+      message: `Mobbex rechazó la generación de pago para la orden #${order.id.slice(0, 8).toUpperCase()} (HTTP ${response.status}).`,
+      actionUrl: '/settings/payments',
+      metadata: {
+        gateway: 'MOBBEX',
+        order_id: order.id,
+        http_status: response.status,
+        details: payload,
+      },
+      baseDedupKey: `mobbex_chk_err:${order.id}`,
+    });
+
     const err: any = new Error('MOBBEX_API_REJECTED');
     err.status = response.status;
     err.details = payload;
@@ -546,6 +561,9 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
         return;
       }
 
+      let createdCommissionAmount = 0;
+      const touchedProductIds: string[] = [];
+
       await prisma.$transaction(async (tx) => {
         const updatedOrder = await tx.order.updateMany({
           where: {
@@ -585,6 +603,7 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
               if (updateResult.count === 0) {
                 throw new Error(`Stock insuficiente para componente del combo ${item.product.name}. Sobreventa abortada.`);
               }
+              touchedProductIds.push(part.product_id);
             }
           } else {
             const updateResult = await tx.product.updateMany({
@@ -601,6 +620,7 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
             if (updateResult.count === 0) {
               throw new Error(`Stock insuficiente para ${item.product.name}. Sobreventa abortada.`);
             }
+            touchedProductIds.push(item.product_id);
           }
 
           const itemTotal = Number(item.unit_price) * item.quantity;
@@ -629,6 +649,8 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
                 clearing_date: clearingDate,
               },
             });
+
+            createdCommissionAmount = sanitizedCommission;
           } else {
             console.warn(`🛡️ [Fraud Prevented] Auto-compra de vendedor bloqueada en Orden ${internalOrderId}.`);
           }
@@ -637,6 +659,43 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
 
       await RedisService.set(processedKey, '1', 86400);
       console.log(`✅ [Webhook Mobbex] Orden ${internalOrderId} PAID y verificada S2S (Tx: ${transactionId}).`);
+
+      if (order.seller_id && createdCommissionAmount > 0 && order.seller?.user_id) {
+        await NotificationsService.notify({
+          userId: order.seller.user_id,
+          role: Role.SELLER,
+          type: NotificationType.COMMISSION_EARNED,
+          title: `Nueva comisión atribuida: +$${createdCommissionAmount.toFixed(2)}`,
+          message: `Pedido #${internalOrderId.slice(0, 8).toUpperCase()} confirmado. La comisión entra en período de garantía.`,
+          actionUrl: '/commissions',
+          metadata: {
+            order_id: internalOrderId,
+            amount: createdCommissionAmount,
+            gateway: 'MOBBEX',
+          },
+          dedupKey: `commission_earned:${internalOrderId}`,
+        });
+      }
+
+      if (order.customer?.user_id) {
+        await NotificationsService.notify({
+          userId: order.customer.user_id,
+          role: Role.CUSTOMER,
+          type: NotificationType.ORDER_PAID,
+          title: '¡Pago aprobado!',
+          message: `Confirmamos el pago de tu pedido #${internalOrderId.slice(0, 8).toUpperCase()} por $${Number(order.total_amount).toFixed(2)}. Ya estamos preparando tu compra.`,
+          actionUrl: `/orders/${internalOrderId}`,
+          metadata: {
+            order_id: internalOrderId,
+            amount: Number(order.total_amount),
+            gateway: 'MOBBEX',
+            transaction_id: transactionId,
+          },
+          dedupKey: `order_paid:${internalOrderId}`,
+        });
+      }
+
+      await NotificationsService.checkAndNotifyLowStock(touchedProductIds);
     }
 
     else if (verifiedStatusCode >= 400 && verifiedStatusCode < 600) {
@@ -657,17 +716,39 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
         },
       });
       console.log(`⚠️ [Webhook Mobbex] Rechazo (${verifiedStatusCode}) registrado en Orden ${internalOrderId}: ${reason}`);
+
+      if (order.customer?.user_id) {
+        await NotificationsService.notify({
+          userId: order.customer.user_id,
+          role: Role.CUSTOMER,
+          type: NotificationType.PAYMENT_ACTION_REQUIRED,
+          title: 'Tu pago no pudo procesarse',
+          message: `El pago de tu pedido #${internalOrderId.slice(0, 8).toUpperCase()} fue rechazado (${reason}). Reintenta con otro medio de pago.`,
+          actionUrl: `/orders/${internalOrderId}`,
+          metadata: {
+            order_id: internalOrderId,
+            gateway: 'MOBBEX',
+            transaction_id: transactionId,
+            failure_code: verifiedStatusCode,
+            reason,
+          },
+          dedupKey: `mobbex_payment_failed:${transactionId}`,
+        });
+      }
     }
 
     else if (verifiedStatusCode >= 600) {
+      let canceledCount = 0;
+
       await prisma.$transaction(async (tx) => {
-        await tx.commissionLedger.updateMany({
+        const canceledResult = await tx.commissionLedger.updateMany({
           where: {
             order_id: internalOrderId,
             status: { in: [CommissionStatus.PENDING_CLEARANCE, CommissionStatus.AVAILABLE] },
           },
           data: { status: CommissionStatus.CANCELED },
         });
+        canceledCount = canceledResult.count;
 
         if (order.status === 'PAID') {
           for (const item of order.items) {
@@ -706,9 +787,63 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
 
       await RedisService.set(processedKey, '1', 86400);
       console.log(`🔄 [Webhook Mobbex] Devolución (${verifiedStatusCode}) verificada: stock reingresado y comisión CANCELED.`);
+
+      if (canceledCount > 0 && order.seller?.user_id) {
+        await NotificationsService.notify({
+          userId: order.seller.user_id,
+          role: Role.SELLER,
+          type: NotificationType.COMMISSION_REVERSED,
+          title: 'Comisión revertida por reembolso',
+          message: `La comisión del pedido #${internalOrderId.slice(0, 8).toUpperCase()} fue cancelada por devolución o contracargo.`,
+          actionUrl: '/commissions',
+          metadata: {
+            order_id: internalOrderId,
+            transaction_id: transactionId,
+            status_code: verifiedStatusCode,
+          },
+          dedupKey: `commission_reversed:${internalOrderId}:${transactionId}`,
+        });
+      }
+
+      if (order.status === 'PAID' && order.customer?.user_id) {
+        await NotificationsService.notify({
+          userId: order.customer.user_id,
+          role: Role.CUSTOMER,
+          type: NotificationType.ORDER_CANCELLED,
+          title: 'Reembolso procesado y pedido cancelado',
+          message: `Se procesó la devolución de $${Number(order.total_amount).toFixed(2)} correspondiente a tu pedido #${internalOrderId.slice(0, 8).toUpperCase()}.`,
+          actionUrl: `/orders/${internalOrderId}`,
+          metadata: {
+            order_id: internalOrderId,
+            transaction_id: transactionId,
+            refunded_amount: Number(order.total_amount),
+            status_code: verifiedStatusCode,
+          },
+          dedupKey: `order_refunded:${internalOrderId}:${transactionId}`,
+        });
+      }
     }
   } catch (error: any) {
     console.error(`❌ [Webhook Mobbex] Error procesando Orden ${internalOrderId}:`, error.message);
+
+    const knownGuards = ['La orden ya fue procesada previamente.', 'Stock insuficiente'];
+    const isSecurityBlock = knownGuards.some((msg) => error.message?.includes(msg));
+
+    if (!isSecurityBlock) {
+      await NotificationsService.notifyAdmins({
+        type: NotificationType.INTEGRATION_FAILURE,
+        title: 'Fallo técnico en webhook Mobbex',
+        message: `Error procesando transacción ${transactionId} de la orden #${internalOrderId.slice(0, 8).toUpperCase()}: ${error.message}`,
+        actionUrl: '/settings/payments',
+        metadata: {
+          gateway: 'MOBBEX',
+          order_id: internalOrderId,
+          transaction_id: transactionId,
+          error: error.message,
+        },
+        baseDedupKey: `mobbex_webhook_err:${transactionId}`,
+      });
+    }
   } finally {
     await RedisService.releaseLock(lockKey);
   }

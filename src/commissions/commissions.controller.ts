@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
-import { CommissionStatus } from '@prisma/client';
+import { CommissionStatus, NotificationType, Role } from '@prisma/client';
+import { NotificationsService } from '../notifications/notifications.service';
 
 export const getAvailableCommissions = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -105,6 +106,28 @@ export const liquidateCommissions = async (req: Request, res: Response): Promise
       return payout;
     });
 
+    const seller = await req.prisma.sellerProfile.findUnique({
+      where: { id: seller_id },
+      select: { user_id: true },
+    });
+
+    if (seller) {
+      await NotificationsService.notify({
+        userId: seller.user_id,
+        role: Role.SELLER,
+        type: NotificationType.PAYOUT_PROCESSED,
+        title: 'Liquidación transferida',
+        message: `Se liquidaron $${Number(result.total_amount).toFixed(2)} a tu cuenta (Ref: ${transaction_ref}).`,
+        actionUrl: '/commissions/payouts',
+        metadata: {
+          payout_id: result.id,
+          amount: Number(result.total_amount),
+          transaction_ref,
+        },
+        dedupKey: `payout_processed:${result.id}`,
+      });
+    }
+
     res.status(200).json({ message: 'Liquidación completada con éxito', data: result });
   } catch (error: any) {
     if (error.code === 'P2002') {
@@ -112,6 +135,69 @@ export const liquidateCommissions = async (req: Request, res: Response): Promise
       return;
     }
     res.status(400).json({ error: error.message });
+  }
+};
+
+export const requestPayout = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) {
+      res.status(401).json({ error: 'Usuario no autenticado.' });
+      return;
+    }
+
+    const seller = await req.prisma.sellerProfile.findUnique({
+      where: { user_id: userId },
+      select: { id: true, first_name: true, last_name: true, cbu_alias: true },
+    });
+
+    if (!seller) {
+      res.status(404).json({ error: 'Perfil de vendedor no encontrado.' });
+      return;
+    }
+
+    if (!seller.cbu_alias) {
+      res.status(400).json({ error: 'Debes configurar tu CBU o Alias antes de solicitar un retiro.' });
+      return;
+    }
+
+    const availableAgg = await req.prisma.commissionLedger.aggregate({
+      where: { seller_id: seller.id, status: CommissionStatus.AVAILABLE },
+      _sum: { amount: true },
+      _count: { id: true },
+    });
+
+    const amount = Number(availableAgg._sum.amount || 0);
+    if (amount <= 0) {
+      res.status(400).json({ error: 'No tienes saldo disponible para retirar.' });
+      return;
+    }
+
+    const sellerName = `${seller.first_name} ${seller.last_name}`.trim();
+    const todayStamp = new Date().toISOString().slice(0, 10);
+
+    await NotificationsService.notifyAdmins({
+      type: NotificationType.PAYOUT_REQUESTED,
+      title: `Solicitud de retiro: $${amount.toFixed(2)}`,
+      message: `${sellerName} solicitó retirar $${amount.toFixed(2)} (${availableAgg._count.id} comisiones) hacia ${seller.cbu_alias}.`,
+      actionUrl: '/commissions/liquidations',
+      metadata: {
+        seller_id: seller.id,
+        amount,
+        cbu_alias: seller.cbu_alias,
+        commissions_count: availableAgg._count.id,
+      },
+      baseDedupKey: `payout_req:${seller.id}:${todayStamp}`,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Solicitud de retiro enviada a administración.',
+      requested_amount: amount,
+    });
+  } catch (error) {
+    console.error('[Commissions] Error al solicitar retiro:', error);
+    res.status(500).json({ error: 'Error interno al procesar la solicitud de retiro.' });
   }
 };
 

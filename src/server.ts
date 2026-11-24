@@ -19,6 +19,7 @@ import categoriesRoutes from './categories/categories.routes';
 import mediaRoutes from './media/media.routes';
 import { startMediaCleanupCron } from './media/media.cron';
 import { initMediaCleanupJob } from './jobs/mediaCleanup.job';
+import notificationsRoutes from './notifications/notifications.routes';
 
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -73,6 +74,7 @@ app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/mobbex', mobbexRoutes);
 app.use('/api/v1/categories', categoriesRoutes);
 app.use('/api/v1/media', mediaRoutes);
+app.use('/api/v1/notifications', notificationsRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: "Core Engine Operativo", version: "1.0.1" });
@@ -95,7 +97,6 @@ async function bootstrap() {
         
         app.listen(port, () => {
             console.log(`🚀 API Gateway escuchando en el puerto ${port}`);
-            startMaturationCron(); 
             startMaturationCron();
             startMediaCleanupCron();
             initMediaCleanupJob();

@@ -1,0 +1,24 @@
+info:
+  name: Ver listado de notificaciones
+  type: http
+
+http:
+  method: GET
+  url: "{{base_url}}/api/v1/notifications?page=1&limit=15"
+  params:
+    - name: page
+      value: "1"
+      type: query
+    - name: limit
+      value: "15"
+      type: query
+  body:
+    type: json
+    data: '{ "status": "CANCELED" }'
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

@@ -1,0 +1,17 @@
+info:
+  name: Ver notificaciones
+  type: http
+
+http:
+  method: GET
+  url: "{{base_url}}/api/v1/notifications/unread-count"
+  body:
+    type: json
+    data: ""
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

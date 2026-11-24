@@ -21,6 +21,7 @@ enum OrderStatus {
   PAID
   SHIPPED
   DELIVERED
+  CANCELED
 }
 
 enum PaymentMethod {
@@ -41,6 +42,24 @@ enum DiscountType {
   FIXED_AMOUNT
 }
 
+enum NotificationType {
+  COMMISSION_EARNED
+  COMMISSION_RELEASED
+  COMMISSION_REVERSED
+  PAYOUT_PROCESSED
+  PAYMENT_ACTION_REQUIRED
+  SHIPPING_ISSUE
+  ORDER_OUT_FOR_DELIVERY
+  PAYOUT_REQUESTED
+  CRITICAL_STOCK_SHORTAGE
+  INTEGRATION_FAILURE
+  ORDER_CREATED
+  ORDER_PAID
+  ORDER_DELIVERED
+  ORDER_CANCELLED
+  ASSISTED_BUDGET_READY
+}
+
 model User {
   id            String  @id @default(uuid()) @db.Uuid
   role          Role    @default(CUSTOMER)
@@ -51,6 +70,7 @@ model User {
   customer_profile CustomerProfile?
   seller_profile   SellerProfile?
   refresh_tokens   RefreshToken[]
+  notifications Notification[]
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
@@ -113,6 +133,8 @@ model Product {
   order_items        OrderItem[]
   supplier_purchases SupplierPurchaseItem[]
   images             ProductImage[]
+  low_stock_threshold Int                   @default(5)
+  low_stock_alerted   Boolean               @default(false)
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
@@ -373,4 +395,24 @@ model RefreshToken {
   @@index([user_id])
   @@index([expires_at])
   @@map("refresh_tokens")
+}
+
+model Notification {
+  id         String           @id @default(uuid()) @db.Uuid
+  user_id    String           @db.Uuid
+  role       Role
+  type       NotificationType
+  title      String           @db.VarChar(140)
+  message    String           @db.Text
+  action_url String?          @db.VarChar(255)
+  metadata   Json?
+  dedup_key  String?          @unique @db.VarChar(150)
+  read_at    DateTime?
+  created_at DateTime         @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, read_at, created_at(sort: Desc)])
+  @@index([user_id, created_at(sort: Desc)])
+  @@map("notifications")
 }

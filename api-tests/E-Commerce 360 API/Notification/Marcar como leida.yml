@@ -1,0 +1,14 @@
+info:
+  name: Marcar como leida
+  type: http
+
+http:
+  method: PATCH
+  url: "{{base_url}}/api/v1/notifications/read-all"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

@@ -1,9 +1,10 @@
 import { Request, Response } from 'express';
-import { OrderStatus, Prisma } from '@prisma/client';
+import { CommissionStatus, NotificationType, OrderStatus, Prisma, Role } from '@prisma/client';
 import { prismaGlobal } from '../config/prisma';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const VALID_ORDER_STATUSES: OrderStatus[] = ['PENDING', 'BUDGET', 'PAID', 'SHIPPED', 'DELIVERED'];
+const VALID_ORDER_STATUSES: OrderStatus[] = ['PENDING', 'BUDGET', 'PAID', 'SHIPPED', 'DELIVERED', 'CANCELED'];
 const CONFIRMED_SALES_STATUSES: OrderStatus[] = ['PAID', 'SHIPPED', 'DELIVERED'];
 
 const SELLER_ALLOWED_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
@@ -12,8 +13,10 @@ const SELLER_ALLOWED_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = 
 };
 
 const ADMIN_ALLOWED_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
-    PAID: ['SHIPPED', 'DELIVERED'],
-    SHIPPED: ['PAID', 'DELIVERED'],
+    PENDING: ['PAID', 'CANCELED'],
+    BUDGET: ['CANCELED'],
+    PAID: ['SHIPPED', 'DELIVERED', 'CANCELED'],
+    SHIPPED: ['PAID', 'DELIVERED', 'CANCELED'],
     DELIVERED: ['SHIPPED']
 };
 
@@ -368,7 +371,31 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
             select: {
                 id: true,
                 status: true,
-                seller_id: true
+                total_amount: true,
+                seller_id: true,
+                seller: {
+                    select: { user_id: true }
+                },
+                customer: {
+                    select: { user_id: true }
+                },
+                items: {
+                    select: {
+                        product_id: true,
+                        quantity: true,
+                        product: {
+                            select: {
+                                is_combo: true,
+                                combo_parts: {
+                                    select: {
+                                        product_id: true,
+                                        quantity: true
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         });
 
@@ -408,21 +435,127 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
             return;
         }
 
-        const updateResult = await prismaGlobal.order.updateMany({
-            where: {
-                id: orderId,
-                status: order.status
-            },
-            data: {
-                status: nextStatus
+        const wasPaidOrShipped = order.status === 'PAID' || order.status === 'SHIPPED';
+        let canceledCommissionsCount = 0;
+
+        const updatedCount = await prismaGlobal.$transaction(async (tx) => {
+            const updateResult = await tx.order.updateMany({
+                where: {
+                    id: orderId,
+                    status: order.status
+                },
+                data: {
+                    status: nextStatus
+                }
+            });
+
+            if (updateResult.count === 0) {
+                return 0;
             }
+
+            if (nextStatus === 'CANCELED' && wasPaidOrShipped) {
+                for (const item of order.items) {
+                    if (!item.product_id || !item.product) continue;
+
+                    if (item.product.is_combo && item.product.combo_parts.length > 0) {
+                        for (const part of item.product.combo_parts) {
+                            await tx.product.update({
+                                where: { id: part.product_id },
+                                data: {
+                                    physical_stock: { increment: part.quantity * item.quantity },
+                                    version: { increment: 1 }
+                                }
+                            });
+                        }
+                    } else {
+                        await tx.product.update({
+                            where: { id: item.product_id },
+                            data: {
+                                physical_stock: { increment: item.quantity },
+                                version: { increment: 1 }
+                            }
+                        });
+                    }
+                }
+
+                const canceledCommissions = await tx.commissionLedger.updateMany({
+                    where: {
+                        order_id: orderId,
+                        status: { in: [CommissionStatus.PENDING_CLEARANCE, CommissionStatus.AVAILABLE] }
+                    },
+                    data: { status: CommissionStatus.CANCELED }
+                });
+                canceledCommissionsCount = canceledCommissions.count;
+            }
+
+            return updateResult.count;
         });
 
-        if (updateResult.count === 0) {
+        if (updatedCount === 0) {
             res.status(409).json({
                 error: 'El estado de la orden cambió concurrentemente. Refresca el listado e intenta nuevamente.'
             });
             return;
+        }
+
+        const shortOrderId = order.id.slice(0, 8).toUpperCase();
+
+        if (nextStatus === 'CANCELED' && canceledCommissionsCount > 0 && order.seller?.user_id) {
+            await NotificationsService.notify({
+                userId: order.seller.user_id,
+                role: Role.SELLER,
+                type: NotificationType.COMMISSION_REVERSED,
+                title: 'Comisión revertida por cancelación',
+                message: `La comisión del pedido #${shortOrderId} fue cancelada debido a la anulación de la orden.`,
+                actionUrl: '/commissions',
+                metadata: {
+                    order_id: order.id,
+                    previous_status: order.status
+                },
+                dedupKey: `commission_reversed_cancel:${order.id}`
+            });
+        }
+
+        if (order.customer?.user_id) {
+            if (nextStatus === 'SHIPPED') {
+                await NotificationsService.notify({
+                    userId: order.customer.user_id,
+                    role: Role.CUSTOMER,
+                    type: NotificationType.ORDER_OUT_FOR_DELIVERY,
+                    title: '¡Tu pedido está en camino!',
+                    message: `Tu pedido #${shortOrderId} ya fue despachado y está en reparto.`,
+                    actionUrl: `/orders/${order.id}`,
+                    metadata: { order_id: order.id },
+                    dedupKey: `order_shipped:${order.id}`
+                });
+            } else if (nextStatus === 'DELIVERED') {
+                await NotificationsService.notify({
+                    userId: order.customer.user_id,
+                    role: Role.CUSTOMER,
+                    type: NotificationType.ORDER_DELIVERED,
+                    title: '¡Pedido entregado!',
+                    message: `Tu pedido #${shortOrderId} fue entregado con éxito. ¡Gracias por tu compra!`,
+                    actionUrl: `/orders/${order.id}`,
+                    metadata: { order_id: order.id },
+                    dedupKey: `order_delivered:${order.id}`
+                });
+            } else if (nextStatus === 'CANCELED') {
+                await NotificationsService.notify({
+                    userId: order.customer.user_id,
+                    role: Role.CUSTOMER,
+                    type: NotificationType.ORDER_CANCELLED,
+                    title: `Pedido #${shortOrderId} cancelado`,
+                    message: wasPaidOrShipped
+                        ? `Tu pedido #${shortOrderId} fue cancelado. Si corresponde un reembolso, nuestro equipo gestionará la devolución.`
+                        : `Tu pedido #${shortOrderId} fue cancelado por falta de acreditación o disponibilidad.`,
+                    actionUrl: `/orders/${order.id}`,
+                    metadata: {
+                        order_id: order.id,
+                        previous_status: order.status
+                    },
+                    dedupKey: `order_canceled:${order.id}`
+                });
+            }
         }
 
         res.status(200).json({
@@ -437,6 +570,88 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
     } catch (error: any) {
         console.error('[OrdersController.updateOrderStatus] Error crítico:', error.message);
         res.status(500).json({ error: 'Error interno al actualizar el estado de la orden.' });
+    }
+};
+
+export const reportShippingIssue = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const reportedBy = req.user?.sub;
+        const orderId = req.params.id as string;
+        const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+
+        if (!reportedBy) {
+            res.status(401).json({ error: 'No autorizado.' });
+            return;
+        }
+
+        if (!UUID_REGEX.test(orderId) || !reason) {
+            res.status(400).json({ error: 'Debes indicar un ID de orden válido y el motivo de la incidencia.' });
+            return;
+        }
+
+        const order = await prismaGlobal.order.findUnique({
+            where: { id: orderId },
+            select: {
+                id: true,
+                gateway_metadata: true,
+                customer: {
+                    select: { user_id: true }
+                }
+            }
+        });
+
+        if (!order) {
+            res.status(404).json({ error: 'Orden no encontrada.' });
+            return;
+        }
+
+        const existingMetadata =
+            order.gateway_metadata && typeof order.gateway_metadata === 'object' && !Array.isArray(order.gateway_metadata)
+                ? (order.gateway_metadata as Record<string, any>)
+                : {};
+
+        const previousIssues = Array.isArray(existingMetadata.shipping_issues)
+            ? existingMetadata.shipping_issues
+            : [];
+
+        const newIssueEntry = {
+            reason,
+            reported_by: reportedBy,
+            reported_at: new Date().toISOString()
+        };
+
+        await prismaGlobal.order.update({
+            where: { id: orderId },
+            data: {
+                gateway_metadata: {
+                    ...existingMetadata,
+                    shipping_issues: [...previousIssues, newIssueEntry]
+                }
+            }
+        });
+
+        if (order.customer?.user_id) {
+            await NotificationsService.notify({
+                userId: order.customer.user_id,
+                role: Role.CUSTOMER,
+                type: NotificationType.SHIPPING_ISSUE,
+                title: 'Incidencia en la entrega de tu pedido',
+                message: `Pedido #${order.id.slice(0, 8).toUpperCase()}: ${reason}`,
+                actionUrl: `/orders/${order.id}`,
+                metadata: {
+                    order_id: order.id,
+                    reason
+                }
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: 'Incidencia logística registrada y cliente notificado.'
+        });
+    } catch (error: any) {
+        console.error('[OrdersController.reportShippingIssue] Error crítico:', error.message);
+        res.status(500).json({ error: 'Error interno al registrar la incidencia logística.' });
     }
 };
 

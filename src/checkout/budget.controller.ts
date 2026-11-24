@@ -1,9 +1,11 @@
 import { Request, Response } from 'express';
+import { NotificationType, Role } from '@prisma/client';
 import { prismaGlobal } from '../config/prisma';
 import { createMpPreference, getMpPaymentById } from './mercadopago.service';
 import { generateMobbexSessionForOrder } from '../mobbex/mobbex.controller';
 import { RedisService } from '../redis/redis.service';
 import { PricingEngine } from '../products/pricing.engine';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const BUDGET_EXPIRATION_HOURS = 48;
 
@@ -53,6 +55,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
     }
 
     let validCustomerId: string | null = null;
+    let validCustomerUserId: string | null = null;
 
     if (customerId && typeof customerId === 'string' && customerId.trim() !== '') {
       const cleanCustomerId = customerId.trim();
@@ -61,6 +64,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
         where: {
           OR: [{ id: cleanCustomerId }, { user_id: cleanCustomerId }],
         },
+        select: { id: true, user_id: true },
       });
 
       if (!customerProfile) {
@@ -71,6 +75,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
       }
 
       validCustomerId = customerProfile.id;
+      validCustomerUserId = customerProfile.user_id;
     }
 
     const productIds = items.map((i: { productId: string }) => i.productId);
@@ -140,6 +145,27 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
         items: { create: orderItemsToCreate },
       },
     });
+
+    if (validCustomerUserId) {
+      const sellerName = `${sellerProfile.first_name} ${sellerProfile.last_name}`.trim();
+      const shortBudgetId = budgetOrder.id.slice(0, 8).toUpperCase();
+
+      await NotificationsService.notify({
+        userId: validCustomerUserId,
+        role: Role.CUSTOMER,
+        type: NotificationType.ASSISTED_BUDGET_READY,
+        title: `Tenés una cotización lista (#${shortBudgetId})`,
+        message: `${sellerName} armó un carrito asistido por $${Number(budgetOrder.total_amount).toFixed(2)}. Revisalo y completá el pago antes de las 48 hs.`,
+        actionUrl: `/budget/${budgetOrder.id}`,
+        metadata: {
+          order_id: budgetOrder.id,
+          seller_id: sellerProfile.id,
+          seller_name: sellerName,
+          total_amount: Number(budgetOrder.total_amount),
+        },
+        dedupKey: `assisted_budget:${budgetOrder.id}`,
+      });
+    }
 
     return res.status(201).json({
       success: true,
@@ -360,11 +386,48 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
   try {
     const paymentData = await getMpPaymentById(txId);
 
+    if (paymentData.status === 'rejected' || paymentData.status === 'cancelled') {
+      const failedOrderId = paymentData.external_reference;
+      if (failedOrderId) {
+        const failedOrder = await prismaGlobal.order.findUnique({
+          where: { id: failedOrderId },
+          select: {
+            id: true,
+            customer: { select: { user_id: true } },
+          },
+        });
+
+        if (failedOrder?.customer?.user_id) {
+          await NotificationsService.notify({
+            userId: failedOrder.customer.user_id,
+            role: Role.CUSTOMER,
+            type: NotificationType.PAYMENT_ACTION_REQUIRED,
+            title: 'Tu pago no pudo procesarse',
+            message: `El pago de tu pedido #${failedOrder.id.slice(0, 8).toUpperCase()} fue rechazado. Reintenta con otro medio de pago.`,
+            actionUrl: `/orders/${failedOrder.id}`,
+            metadata: {
+              order_id: failedOrder.id,
+              gateway: 'MP',
+              payment_id: txId,
+              status: paymentData.status,
+            },
+            dedupKey: `mp_payment_failed:${txId}`,
+          });
+        }
+      }
+      await RedisService.set(processedKey, '1', 86400);
+      return res.status(200).send('Pago rechazado notificado');
+    }
+
     if (paymentData.status === 'approved') {
       const orderId = paymentData.external_reference;
       if (!orderId) {
         return res.status(200).send('Pago aprobado pero sin external_reference. Ignorando.');
       }
+
+      let didTransition = false;
+      let createdCommissionAmount = 0;
+      const touchedProductIds: string[] = [];
 
       await prismaGlobal.$transaction(async (tx) => {
         const transitioned = await tx.order.updateMany({
@@ -379,6 +442,7 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
         });
 
         if (transitioned.count === 0) return;
+        didTransition = true;
 
         const order = await tx.order.findUnique({
           where: { id: orderId },
@@ -419,6 +483,7 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
               if (decResult.count === 0) {
                 throw new Error(`Stock insuficiente para componente de combo (${part.product_id}).`);
               }
+              touchedProductIds.push(part.product_id);
             }
           } else {
             const decResult = await tx.product.updateMany({
@@ -435,6 +500,7 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
             if (decResult.count === 0) {
               throw new Error(`Stock insuficiente para ${item.product.name}. Sobreventa abortada.`);
             }
+            touchedProductIds.push(item.product_id);
           }
 
           const rate =
@@ -452,6 +518,7 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
             order.seller?.user_id && order.customer?.user_id && order.seller.user_id === order.customer.user_id;
 
           if (!isSelfPurchase) {
+            const sanitizedCommission = Math.round(totalCommission * 100) / 100;
             const clearingDate = new Date();
             clearingDate.setDate(clearingDate.getDate() + 15);
 
@@ -459,11 +526,13 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
               data: {
                 order_id: order.id,
                 seller_id: order.seller_id,
-                amount: Math.round(totalCommission * 100) / 100,
+                amount: sanitizedCommission,
                 status: 'PENDING_CLEARANCE',
                 clearing_date: clearingDate,
               },
             });
+
+            createdCommissionAmount = sanitizedCommission;
           } else {
             console.warn(`[FRAUD PREVENTED] Auto-compra detectada. Orden: ${order.id}. No se liquidó comisión.`);
           }
@@ -471,6 +540,56 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
       });
 
       await RedisService.set(processedKey, '1', 86400);
+
+      if (didTransition) {
+        const approvedOrder = await prismaGlobal.order.findUnique({
+          where: { id: orderId },
+          select: {
+            id: true,
+            total_amount: true,
+            seller_id: true,
+            seller: { select: { user_id: true } },
+            customer: { select: { user_id: true } },
+          },
+        });
+
+        if (approvedOrder?.seller_id && createdCommissionAmount > 0 && approvedOrder.seller?.user_id) {
+          await NotificationsService.notify({
+            userId: approvedOrder.seller.user_id,
+            role: Role.SELLER,
+            type: NotificationType.COMMISSION_EARNED,
+            title: `Nueva comisión atribuida: +$${createdCommissionAmount.toFixed(2)}`,
+            message: `Pedido #${approvedOrder.id.slice(0, 8).toUpperCase()} confirmado. La comisión entra en período de garantía.`,
+            actionUrl: '/commissions',
+            metadata: {
+              order_id: approvedOrder.id,
+              amount: createdCommissionAmount,
+              gateway: 'MP',
+            },
+            dedupKey: `commission_earned:${approvedOrder.id}`,
+          });
+        }
+
+        if (approvedOrder?.customer?.user_id) {
+          await NotificationsService.notify({
+            userId: approvedOrder.customer.user_id,
+            role: Role.CUSTOMER,
+            type: NotificationType.ORDER_PAID,
+            title: '¡Pago aprobado!',
+            message: `Confirmamos el pago de tu pedido #${approvedOrder.id.slice(0, 8).toUpperCase()} por $${Number(approvedOrder.total_amount).toFixed(2)}. Ya estamos preparando tu compra.`,
+            actionUrl: `/orders/${approvedOrder.id}`,
+            metadata: {
+              order_id: approvedOrder.id,
+              amount: Number(approvedOrder.total_amount),
+              gateway: 'MP',
+              payment_id: txId,
+            },
+            dedupKey: `order_paid:${approvedOrder.id}`,
+          });
+        }
+
+        await NotificationsService.checkAndNotifyLowStock(touchedProductIds);
+      }
     }
 
     return res.status(200).send('Webhook procesado con éxito');
