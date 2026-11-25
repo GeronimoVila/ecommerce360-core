@@ -390,14 +390,66 @@ export const mobbexCheckoutBridge = (req: Request, res: Response): void => {
 };
 
 export const simulateMobbexGateway = async (req: Request, res: Response): Promise<void> => {
-  const { orderId, total, action = 'approve' } = req.query;
-  const statusCode = action === 'reject' ? '400' : '200';
-  const statusText = action === 'reject' ? 'Rechazada (Simulación)' : 'Aprobada (Simulación)';
+  const { orderId, total, action, confirm } = req.query;
+  const safeOrderId = String(orderId || '');
   const numericTotal = Number(total || 0);
   const baseWebhookUrl = (process.env.WEBHOOK_URL || '').trim().replace(/\/$/, '');
   const frontendUrl = (process.env.FRONTEND_B2C_URL || 'http://localhost:3000').trim().replace(/\/$/, '');
 
-  await fetch(`${baseWebhookUrl}/api/mobbex/webhook?options=final&internalOrderId=${orderId}`, {
+  if (confirm !== '1') {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(`<!DOCTYPE html>
+      <html lang="es">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Mobbex Checkout Sandbox</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f3f4f6; margin: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; color: #111827; }
+          .card { background: #fff; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); max-width: 420px; width: 100%; overflow: hidden; border: 1px solid #e5e7eb; }
+          .header { background: #6b21a8; color: #fff; padding: 20px 24px; display: flex; justify-content: space-between; align-items: center; }
+          .badge { background: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; }
+          .body { padding: 24px; }
+          .row { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 14px; color: #4b5563; }
+          .total { font-size: 26px; font-weight: 800; color: #111827; margin: 16px 0 24px; padding-top: 16px; border-top: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: baseline; }
+          .btn { display: block; width: 100%; text-align: center; padding: 14px; border-radius: 10px; font-weight: 700; font-size: 15px; text-decoration: none; margin-bottom: 10px; box-sizing: border-box; }
+          .btn-approve { background: #6b21a8; color: #fff; }
+          .btn-approve:hover { background: #581c87; }
+          .btn-reject { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; font-size: 13px; }
+          .btn-reject:hover { background: #e5e7eb; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="header">
+            <strong style="font-size:18px;">mobbex</strong>
+            <span class="badge">SANDBOX DEMO</span>
+          </div>
+          <div class="body">
+            <div class="row"><span>Comercio</span><strong>Ecommerce 360</strong></div>
+            <div class="row"><span>Referencia</span><span style="font-family:monospace;">#${safeOrderId.slice(0, 8).toUpperCase()}</span></div>
+            <div class="row"><span>Medio seleccionado</span><span>Tarjeta de Crédito / Débito</span></div>
+            <div class="total">
+              <span style="font-size:14px;font-weight:600;color:#6b7280;">Total a pagar</span>
+              <span>$${numericTotal.toLocaleString('es-AR')} ARS</span>
+            </div>
+            <a class="btn btn-approve" href="${baseWebhookUrl}/api/mobbex/mock-gateway?orderId=${encodeURIComponent(safeOrderId)}&total=${numericTotal}&action=approve&confirm=1">
+              Confirmar y Pagar $${numericTotal.toLocaleString('es-AR')}
+            </a>
+            <a class="btn btn-reject" href="${baseWebhookUrl}/api/mobbex/mock-gateway?orderId=${encodeURIComponent(safeOrderId)}&total=${numericTotal}&action=reject&confirm=1">
+              Simular Rechazo / Cancelar Pago
+            </a>
+          </div>
+        </div>
+      </body>
+      </html>`);
+    return;
+  }
+
+  const statusCode = action === 'reject' ? '400' : '200';
+  const statusText = action === 'reject' ? 'Rechazada (Simulación)' : 'Aprobada (Simulación)';
+
+  await fetch(`${baseWebhookUrl}/api/mobbex/webhook?options=final&internalOrderId=${encodeURIComponent(safeOrderId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -415,7 +467,7 @@ export const simulateMobbexGateway = async (req: Request, res: Response): Promis
 
   const outcome = action === 'reject' ? 'failure' : 'approved';
   res.redirect(
-    `${frontendUrl}/checkout/success?orderId=${encodeURIComponent(String(orderId || ''))}&gateway=MOBBEX&outcome=${outcome}&simulated=true`
+    `${frontendUrl}/checkout/success?orderId=${encodeURIComponent(safeOrderId)}&gateway=MOBBEX&outcome=${outcome}&simulated=true`
   );
 };
 
@@ -579,6 +631,13 @@ export const handleMobbexWebhook = async (req: Request, res: Response): Promise<
 
         if (updatedOrder.count === 0) {
           throw new Error('La orden ya fue procesada previamente.');
+        }
+
+        if (order.coupon_id) {
+          await tx.coupon.update({
+            where: { id: order.coupon_id },
+            data: { used_count: { increment: 1 } },
+          });
         }
 
         let totalCommissionAmount = 0;

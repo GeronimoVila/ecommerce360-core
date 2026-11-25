@@ -461,6 +461,13 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
 
         if (!order) return;
 
+        if (order.coupon_id) {
+          await tx.coupon.update({
+            where: { id: order.coupon_id },
+            data: { used_count: { increment: 1 } },
+          });
+        }
+
         let totalCommission = 0;
 
         for (const item of order.items) {

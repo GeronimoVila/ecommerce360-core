@@ -114,14 +114,14 @@ export const validateCoupon = async (req: Request, res: Response): Promise<Respo
         });
 
         if (!coupon) return res.status(404).json({ error: 'Cupón no encontrado.' });
-        if (!coupon.is_active) return res.status(400).json({ error: 'El cupón ha sido desactivado.' });
+        if (!coupon.is_active) return res.status(400).json({ error: 'Cupón inválido.' });
 
         const now = new Date();
-        if (coupon.starts_at && coupon.starts_at > now) return res.status(400).json({ error: 'El cupón aún no entra en vigencia.' });
-        if (coupon.expires_at && coupon.expires_at < now) return res.status(400).json({ error: 'El cupón ha caducado.' });
+        if (coupon.starts_at && coupon.starts_at > now) return res.status(400).json({ error: 'Cupón inválido.' });
+        if (coupon.expires_at && coupon.expires_at < now) return res.status(400).json({ error: 'Cupón inválido.' });
 
         if (coupon.max_uses !== null && coupon.used_count >= coupon.max_uses) {
-            return res.status(400).json({ error: 'El cupón agotó su límite máximo de usos globales.' });
+            return res.status(400).json({ error: 'Cupón inválido.' });
         }
 
         const subtotalNum = Number(cartSubtotal);

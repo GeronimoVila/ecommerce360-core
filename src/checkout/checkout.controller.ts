@@ -16,7 +16,7 @@ const mpClient = new MercadoPagoConfig({
 
 export const createCheckoutIntent = async (req: Request, res: Response): Promise<Response | void> => {
     try {
-        const { items, paymentMethod, customerId } = req.body;
+        const { items, paymentMethod, customerId, couponCode } = req.body;
 
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: 'El carrito no puede estar vacío.' });
@@ -124,13 +124,13 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             }
         }
 
-        let totalAmount = 0;
+        let subtotalAmount = 0;
         const orderItemsToCreate = items.map((frontendItem: any) => {
             const dbProduct = dbProducts.find(p => p.id === frontendItem.productId)!;
             const unitPrice = Number(dbProduct.base_price);
             const quantity = Number(frontendItem.quantity);
 
-            totalAmount += (unitPrice * quantity);
+            subtotalAmount += (unitPrice * quantity);
 
             return {
                 product_id: dbProduct.id,
@@ -141,6 +141,54 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             };
         });
 
+        let appliedCouponId: string | null = null;
+        let appliedCouponCode: string | null = null;
+        let discountAmount = 0;
+
+        if (typeof couponCode === 'string' && couponCode.trim() !== '') {
+            const normalizedCode = couponCode.trim().toUpperCase();
+            const coupon = await prismaGlobal.coupon.findUnique({
+                where: { code: normalizedCode }
+            });
+
+            if (!coupon) {
+                return res.status(404).json({ error: 'El cupón ingresado no existe.' });
+            }
+            if (!coupon.is_active) {
+                return res.status(400).json({ error: 'El cupón ingresado ha sido desactivado.' });
+            }
+
+            const now = new Date();
+            if (coupon.starts_at && coupon.starts_at > now) {
+                return res.status(400).json({ error: 'El cupón aún no entra en vigencia.' });
+            }
+            if (coupon.expires_at && coupon.expires_at < now) {
+                return res.status(400).json({ error: 'El cupón ha caducado.' });
+            }
+            if (coupon.max_uses !== null && coupon.used_count >= coupon.max_uses) {
+                return res.status(400).json({ error: 'El cupón agotó su límite máximo de usos.' });
+            }
+
+            const minPurchase = Number(coupon.min_purchase_amount || 0);
+            if (minPurchase > 0 && subtotalAmount < minPurchase) {
+                return res.status(400).json({
+                    error: `La compra mínima requerida para usar este cupón es de $${minPurchase}.`
+                });
+            }
+
+            if (coupon.discount_type === 'PERCENTAGE') {
+                discountAmount = subtotalAmount * (Number(coupon.discount_value) / 100);
+            } else {
+                discountAmount = Number(coupon.discount_value);
+            }
+
+            discountAmount = Math.min(Math.round(discountAmount * 100) / 100, subtotalAmount);
+            appliedCouponId = coupon.id;
+            appliedCouponCode = coupon.code;
+        }
+
+        const totalAmount = Math.max(0, Math.round((subtotalAmount - discountAmount) * 100) / 100);
+
         const draftOrder = await prismaGlobal.$transaction(async (tx) => {
             return await tx.order.create({
                 data: {
@@ -148,6 +196,9 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                     seller_id: validSellerId,
                     status: 'PENDING',
                     total_amount: totalAmount,
+                    coupon_id: appliedCouponId,
+                    coupon_code: appliedCouponCode,
+                    discount_amount: discountAmount,
                     payment_method: paymentMethod,
                     items: {
                         create: orderItemsToCreate
@@ -169,6 +220,15 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 quantity: i.quantity,
                 unit_price: Number(i.pure_base_price) 
             }));
+
+            if (discountAmount > 0 && appliedCouponCode) {
+                mpItems.push({
+                    id: `COUPON-${appliedCouponCode}`,
+                    title: `Descuento Cupón (${appliedCouponCode})`,
+                    quantity: 1,
+                    unit_price: -Number(discountAmount.toFixed(2))
+                });
+            }
 
             const mpResponse = await createMpPreference(draftOrder.id, mpItems);
             
@@ -219,6 +279,8 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             order: {
                 id: draftOrder.id,
                 total_amount: draftOrder.total_amount,
+                discount_amount: draftOrder.discount_amount,
+                coupon_code: draftOrder.coupon_code,
                 status: draftOrder.status,
                 itemsCount: draftOrder.items.length
             },
@@ -319,6 +381,13 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
 
             if (updatedOrder.count === 0) {
                 throw new Error('La orden ya fue procesada previamente.');
+            }
+
+            if (order.coupon_id) {
+                await tx.coupon.update({
+                    where: { id: order.coupon_id },
+                    data: { used_count: { increment: 1 } }
+                });
             }
 
             let totalCommissionAmount = 0;

@@ -23,6 +23,54 @@ const PRODUCT_IMAGES_SELECT = {
   is_primary: true
 };
 
+interface ComboPartStockInfo {
+  product_id?: string;
+  quantity: number;
+  product: {
+    id?: string;
+    physical_stock: number;
+    is_active?: boolean;
+  };
+}
+
+function computeVirtualStockFromParts(parts?: ComboPartStockInfo[]): number {
+  if (!parts || parts.length === 0) return 0;
+
+  let minVirtualStock = Infinity;
+  for (const part of parts) {
+    if (part.product.is_active === false) return 0;
+    const qty = Number(part.quantity) || 0;
+    if (qty <= 0) continue;
+    const partStock = Number(part.product.physical_stock) || 0;
+    const available = Math.floor(partStock / qty);
+    if (available < minVirtualStock) {
+      minVirtualStock = available;
+    }
+  }
+
+  return minVirtualStock === Infinity ? 0 : minVirtualStock;
+}
+
+async function resolveAndSyncComboStock(
+  comboId: string,
+  parts: ComboPartStockInfo[] | undefined,
+  cachedRedisStock: number | null | undefined
+): Promise<number> {
+  const computedStock = computeVirtualStockFromParts(parts);
+
+  if (cachedRedisStock === null || cachedRedisStock === undefined || cachedRedisStock !== computedStock) {
+    await RedisService.setComboStock(comboId, computedStock);
+    const partIds = (parts || [])
+      .map((p) => p.product_id || p.product?.id)
+      .filter((pid): pid is string => Boolean(pid));
+    if (partIds.length > 0) {
+      await RedisService.registerComboDependencies(comboId, partIds);
+    }
+  }
+
+  return computedStock;
+}
+
 async function validateUniqueProductFields(
   prismaClient: any,
   params: { sku?: string; name?: string; excludeId?: string }
@@ -388,22 +436,39 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
         images: {
           orderBy: { position: 'asc' },
           select: PRODUCT_IMAGES_SELECT
+        },
+        combo_parts: {
+          include: {
+            product: {
+              select: { id: true, sku: true, name: true, physical_stock: true, is_active: true }
+            }
+          }
         }
       }
     });
 
     const comboIds = products.filter(p => p.is_combo).map(p => p.id);
-    const comboStocks = await RedisService.getMultipleComboStocks(comboIds);
+    const comboStocks = comboIds.length > 0
+      ? await RedisService.getMultipleComboStocks(comboIds)
+      : {};
 
-    const hydratedProducts = products.map(product => {
-      if (product.is_combo) {
-        return {
-          ...product,
-          physical_stock: comboStocks[product.id] ?? 0
-        };
-      }
-      return product;
-    });
+    const hydratedProducts = await Promise.all(
+      products.map(async (product) => {
+        if (product.is_combo) {
+          const virtualStock = await resolveAndSyncComboStock(
+            product.id,
+            product.combo_parts,
+            comboStocks[product.id]
+          );
+          return {
+            ...product,
+            physical_stock: virtualStock
+          };
+        }
+        const { combo_parts, ...simpleProduct } = product;
+        return simpleProduct;
+      })
+    );
 
     const activeRules = await RedisService.getActivePaymentRules();
     const finalProducts = PricingEngine.applyDynamicPricing(hydratedProducts, activeRules);
@@ -448,7 +513,7 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
         combo_parts: {
           include: {
             product: {
-              select: { sku: true, name: true, physical_stock: true, purchase_cost: true }
+              select: { id: true, sku: true, name: true, physical_stock: true, purchase_cost: true, is_active: true }
             }
           }
         }
@@ -461,14 +526,20 @@ export const getProductById = async (req: Request, res: Response): Promise<void>
     }
 
     if (userRole === 'ADMIN' || userRole === 'SELLER') {
+      if (product.is_combo) {
+        const cachedStock = await RedisService.getComboStock(product.id);
+        const virtualStock = await resolveAndSyncComboStock(product.id, product.combo_parts, cachedStock);
+        res.status(200).json({ ...product, physical_stock: virtualStock });
+        return;
+      }
       res.status(200).json(product);
       return;
     }
 
     let stockToReport = product.physical_stock;
     if (product.is_combo) {
-      const virtualStock = await RedisService.getComboStock(product.id);
-      stockToReport = virtualStock ?? 0;
+      const cachedStock = await RedisService.getComboStock(product.id);
+      stockToReport = await resolveAndSyncComboStock(product.id, product.combo_parts, cachedStock);
     }
 
     const responsePayload = {
@@ -841,7 +912,7 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
         combo_parts: {
           include: {
             product: {
-              select: { sku: true, name: true, purchase_cost: true, physical_stock: true }
+              select: { id: true, sku: true, name: true, purchase_cost: true, physical_stock: true, is_active: true }
             }
           }
         }
@@ -854,22 +925,30 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
       ? await RedisService.getMultipleComboStocks(comboIds)
       : {};
 
-    const hydratedProducts = products.map(product => {
-      if (product.is_combo) {
-        const dynamicCost = product.combo_parts.reduce((acc, part) => {
-          return acc + (Number(part.product.purchase_cost) * part.quantity);
-        }, 0);
+    const hydratedProducts = await Promise.all(
+      products.map(async (product) => {
+        if (product.is_combo) {
+          const dynamicCost = product.combo_parts.reduce((acc, part) => {
+            return acc + (Number(part.product.purchase_cost) * part.quantity);
+          }, 0);
 
-        return {
-          ...product,
-          physical_stock: comboStocks[product.id] ?? 0,
-          purchase_cost: new Prisma.Decimal(dynamicCost)
-        };
-      }
+          const virtualStock = await resolveAndSyncComboStock(
+            product.id,
+            product.combo_parts,
+            comboStocks[product.id]
+          );
 
-      const { combo_parts, ...simpleProduct } = product;
-      return simpleProduct;
-    });
+          return {
+            ...product,
+            physical_stock: virtualStock,
+            purchase_cost: new Prisma.Decimal(dynamicCost)
+          };
+        }
+
+        const { combo_parts, ...simpleProduct } = product;
+        return simpleProduct;
+      })
+    );
 
     const total = await req.prisma.product.count({ where: whereClause });
 
@@ -921,9 +1000,11 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
           include: {
             product: {
               select: {
+                id: true,
                 sku: true,
                 name: true,
-                physical_stock: true
+                physical_stock: true,
+                is_active: true
               }
             }
           }
@@ -936,18 +1017,25 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
       ? await RedisService.getMultipleComboStocks(comboIds)
       : {};
 
-    const hydratedProducts = products.map(product => {
-      const parts = product.combo_parts || [];
+    const hydratedProducts = await Promise.all(
+      products.map(async (product) => {
+        const parts = product.combo_parts || [];
 
-      if (product.is_combo) {
-        return {
-          ...product,
-          combo_parts: parts,
-          physical_stock: comboStocks[product.id] ?? 0
-        };
-      }
-      return product;
-    });
+        if (product.is_combo) {
+          const virtualStock = await resolveAndSyncComboStock(
+            product.id,
+            parts,
+            comboStocks[product.id]
+          );
+          return {
+            ...product,
+            combo_parts: parts,
+            physical_stock: virtualStock
+          };
+        }
+        return product;
+      })
+    );
 
     const availableProducts = hydratedProducts.filter(p => p.physical_stock > 0);
 
@@ -993,7 +1081,7 @@ export const getStorefrontProductById = async (req: Request, res: Response): Pro
         combo_parts: {
           include: {
             product: {
-              select: { sku: true, name: true, physical_stock: true }
+              select: { id: true, sku: true, name: true, physical_stock: true, is_active: true }
             }
           }
         }
@@ -1007,8 +1095,8 @@ export const getStorefrontProductById = async (req: Request, res: Response): Pro
 
     let stockToReport = product.physical_stock;
     if (product.is_combo) {
-      const virtualStock = await RedisService.getComboStock(product.id);
-      stockToReport = virtualStock ?? 0;
+      const cachedStock = await RedisService.getComboStock(product.id);
+      stockToReport = await resolveAndSyncComboStock(product.id, product.combo_parts, cachedStock);
     }
 
     const responsePayload = { ...product, physical_stock: stockToReport };
