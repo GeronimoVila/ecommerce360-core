@@ -73,7 +73,7 @@ export const createCategory = async (req: Request, res: Response): Promise<void>
     });
   } catch (error: any) {
     if (error.code === 'P2002') {
-      res.status(409).json({ error: 'Ya existe una categoría con un slug idéntico. Usa un nombre más específico.' });
+      res.status(409).json({ error: 'Ya existe una categoría con ese nombre.' });
       return;
     }
     console.error('[CategoriesController] Error en createCategory:', error);

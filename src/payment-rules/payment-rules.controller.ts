@@ -53,7 +53,7 @@ export const createPaymentRule = async (req: Request, res: Response): Promise<vo
   } catch (error: any) {
     if (error.code === 'P2002') {
       res.status(409).json({ 
-        error: 'Conflicto: Ya existe una regla idéntica para este método de pago, cantidad de cuotas y alcance (Producto/Categoría/Global).' 
+        error: 'Ya existe una regla para este método de pago, cantidad de cuotas y alcance.' 
       });
       return;
     }
