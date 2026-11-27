@@ -14,6 +14,17 @@ const SESSION_ONLY_DB_HOURS = 24;
 const hashToken = (rawToken: string): string =>
   crypto.createHash('sha256').update(rawToken).digest('hex');
 
+const getCookieOptions = (
+  isProd: boolean,
+  extraOptions?: { maxAge?: number }
+) => ({
+  httpOnly: true,
+  secure: isProd,
+  sameSite: (isProd ? 'none' : 'lax') as 'none' | 'lax',
+  path: '/',
+  ...extraOptions,
+});
+
 const issueAuthCookies = (
   res: Response,
   user: { id: string; email: string; role: string },
@@ -29,21 +40,17 @@ const issueAuthCookies = (
     { expiresIn: ACCESS_TOKEN_TTL_SECONDS }
   );
 
-  res.cookie('access_token', accessToken, {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: 'lax',
-    path: '/',
-    maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-  });
+  res.cookie(
+    'access_token',
+    accessToken,
+    getCookieOptions(isProd, { maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000 })
+  );
 
-  res.cookie('refresh_token', rawRefreshToken, {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: 'lax',
-    path: '/',
-    ...(rememberMe ? { maxAge: ETERNAL_SLIDING_MS } : {}),
-  });
+  res.cookie(
+    'refresh_token',
+    rawRefreshToken,
+    getCookieOptions(isProd, rememberMe ? { maxAge: ETERNAL_SLIDING_MS } : undefined)
+  );
 
   return accessToken;
 };
@@ -106,6 +113,8 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 };
 
 export const refreshSession = async (req: Request, res: Response): Promise<void> => {
+  const isProd = process.env.NODE_ENV === 'production';
+  const clearOpts = getCookieOptions(isProd);
   const incomingRefreshToken = req.cookies?.refresh_token;
 
   if (!incomingRefreshToken) {
@@ -135,15 +144,15 @@ export const refreshSession = async (req: Request, res: Response): Promise<void>
         data: { revoked_at: new Date() },
       });
     }
-    res.clearCookie('access_token', { path: '/' });
-    res.clearCookie('refresh_token', { path: '/' });
+    res.clearCookie('access_token', clearOpts);
+    res.clearCookie('refresh_token', clearOpts);
     res.status(401).json({ error: 'Sesión inválida o comprometida. Inicia sesión nuevamente.' });
     return;
   }
 
   if (storedToken.expires_at < new Date() || !storedToken.user.is_active) {
-    res.clearCookie('access_token', { path: '/' });
-    res.clearCookie('refresh_token', { path: '/' });
+    res.clearCookie('access_token', clearOpts);
+    res.clearCookie('refresh_token', clearOpts);
     res.status(401).json({ error: 'La sesión ha expirado o la cuenta está inactiva.' });
     return;
   }
@@ -183,6 +192,7 @@ export const refreshSession = async (req: Request, res: Response): Promise<void>
 };
 
 export const logout = async (req: Request, res: Response): Promise<void> => {
+  const isProd = process.env.NODE_ENV === 'production';
   const payload = req.user;
   const incomingRefreshToken = req.cookies?.refresh_token;
 
@@ -197,8 +207,9 @@ export const logout = async (req: Request, res: Response): Promise<void> => {
     });
   }
 
-  res.clearCookie('access_token', { path: '/' });
-  res.clearCookie('refresh_token', { path: '/' });
+  const clearOpts = getCookieOptions(isProd);
+  res.clearCookie('access_token', clearOpts);
+  res.clearCookie('refresh_token', clearOpts);
   res.json({ message: 'Logout exitoso' });
 };
 

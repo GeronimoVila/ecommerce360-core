@@ -42,17 +42,26 @@ redis.on('error', (err: any) => {
 
 const app = express();
 
+const normalizeOrigin = (value?: string) => value?.trim().replace(/\/+$/, '');
+
 const allowedOrigins = [
     process.env.FRONTEND_B2C_URL || 'http://localhost:3000',
-    process.env.FRONTEND_B2B_URL || 'http://localhost:5173'
-];
+    process.env.FRONTEND_B2B_URL || 'http://localhost:5173',
+    process.env.RENDER_EXTERNAL_URL,
+    process.env.API_PUBLIC_URL,
+]
+    .map(normalizeOrigin)
+    .filter((origin): origin is string => Boolean(origin));
+
+app.set('trust proxy', 1);
 
 app.use(cors({
     origin: function(origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
+        const normalizedOrigin = normalizeOrigin(origin);
+        if (!normalizedOrigin || allowedOrigins.includes(normalizedOrigin)) {
             callback(null, true);
         } else {
-            callback(new Error('Bloqueado por CORS - Origen no autorizado'));
+            callback(new Error(`Bloqueado por CORS - Origen no autorizado: ${origin}`));
         }
     },
     credentials: true,
