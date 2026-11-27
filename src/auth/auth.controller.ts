@@ -56,7 +56,14 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const user = await prismaGlobal.user.findUnique({ where: { email } });
+  const user = await prismaGlobal.user.findUnique({
+    where: { email },
+    include: {
+      customer_profile: {
+        select: { id: true, dni: true, first_name: true, last_name: true, phone: true },
+      },
+    },
+  });
   if (!user || !user.is_active) {
     res.status(401).json({ error: 'Credenciales inválidas o cuenta inactiva' });
     return;
@@ -93,6 +100,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       id: user.id,
       email: user.email,
       role: user.role,
+      customer_profile: user.customer_profile,
     },
   });
 };
@@ -109,7 +117,15 @@ export const refreshSession = async (req: Request, res: Response): Promise<void>
 
   const storedToken = await prismaGlobal.refreshToken.findUnique({
     where: { token_hash: incomingHash },
-    include: { user: true },
+    include: {
+      user: {
+        include: {
+          customer_profile: {
+            select: { id: true, dni: true, first_name: true, last_name: true, phone: true },
+          },
+        },
+      },
+    },
   });
 
   if (!storedToken || storedToken.revoked_at) {
@@ -161,6 +177,7 @@ export const refreshSession = async (req: Request, res: Response): Promise<void>
       id: storedToken.user.id,
       email: storedToken.user.email,
       role: storedToken.user.role,
+      customer_profile: storedToken.user.customer_profile,
     },
   });
 };
@@ -186,7 +203,19 @@ export const logout = async (req: Request, res: Response): Promise<void> => {
 };
 
 export const registerCustomer = async (req: Request, res: Response): Promise<void> => {
-  const { email, password, first_name, last_name, phone } = req.body;
+  const { email, password, first_name, last_name, phone, dni } = req.body;
+
+  const cleanDni = typeof dni === 'string' ? dni.replace(/\D/g, '').trim() : '';
+
+  if (!email || !password || !first_name || !last_name || !cleanDni) {
+    res.status(400).json({ error: 'Nombre, apellido, DNI, email y contraseña son obligatorios' });
+    return;
+  }
+
+  if (cleanDni.length < 7 || cleanDni.length > 11) {
+    res.status(400).json({ error: 'El DNI/CUIT debe tener entre 7 y 11 dígitos numéricos' });
+    return;
+  }
 
   try {
     const password_hash = await bcrypt.hash(password, 10);
@@ -194,7 +223,7 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
     const newCustomer = await prismaGlobal.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: {
-          email,
+          email: email.trim().toLowerCase(),
           password_hash,
           role: 'CUSTOMER',
         },
@@ -203,9 +232,10 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
       const profile = await tx.customerProfile.create({
         data: {
           user_id: user.id,
-          first_name,
-          last_name,
-          phone,
+          dni: cleanDni,
+          first_name: first_name.trim(),
+          last_name: last_name.trim(),
+          phone: phone?.trim() || null,
         },
       });
 
@@ -219,6 +249,13 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
     });
   } catch (error: any) {
     if (error.code === 'P2002') {
+      const target = Array.isArray(error.meta?.target)
+        ? error.meta.target.join(',')
+        : String(error.meta?.target || '');
+      if (target.includes('dni')) {
+        res.status(409).json({ error: 'Ya existe una cuenta registrada con ese DNI' });
+        return;
+      }
       res.status(409).json({ error: 'El email ya se encuentra registrado' });
       return;
     }
@@ -234,11 +271,50 @@ export const getSession = async (req: Request, res: Response): Promise<void> => 
     return;
   }
 
-  res.json({
-    user: {
-      id: payload.sub,
-      email: payload.email,
-      role: payload.role,
-    },
-  });
+  try {
+    const user = await prismaGlobal.user.findUnique({
+      where: { id: payload.sub },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        is_active: true,
+        customer_profile: {
+          select: {
+            id: true,
+            dni: true,
+            first_name: true,
+            last_name: true,
+            phone: true,
+          },
+        },
+        seller_profile: {
+          select: {
+            id: true,
+            first_name: true,
+            last_name: true,
+            ref_code: true,
+          },
+        },
+      },
+    });
+
+    if (!user || !user.is_active) {
+      res.status(401).json({ error: 'Usuario no encontrado o inactivo' });
+      return;
+    }
+
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        customer_profile: user.customer_profile,
+        seller_profile: user.seller_profile,
+      },
+    });
+  } catch (error) {
+    console.error('[AuthController.getSession] Error:', error);
+    res.status(500).json({ error: 'Error al obtener la sesión del usuario' });
+  }
 };

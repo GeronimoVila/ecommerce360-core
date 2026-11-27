@@ -6,6 +6,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const VALID_ORDER_STATUSES: OrderStatus[] = ['PENDING', 'BUDGET', 'PAID', 'SHIPPED', 'DELIVERED', 'CANCELED'];
 const CONFIRMED_SALES_STATUSES: OrderStatus[] = ['PAID', 'SHIPPED', 'DELIVERED'];
+const SELLER_VISIBLE_STATUSES: OrderStatus[] = ['PENDING', 'PAID', 'SHIPPED', 'DELIVERED'];
 
 const SELLER_ALLOWED_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
     PAID: ['SHIPPED', 'DELIVERED'],
@@ -147,13 +148,13 @@ export const getManageableOrders = async (req: Request, res: Response): Promise<
         }
 
         if (VALID_ORDER_STATUSES.includes(statusParam as OrderStatus)) {
-            if (userRole === 'SELLER' && !CONFIRMED_SALES_STATUSES.includes(statusParam as OrderStatus)) {
-                whereClause.status = { in: CONFIRMED_SALES_STATUSES };
+            if (userRole === 'SELLER' && !SELLER_VISIBLE_STATUSES.includes(statusParam as OrderStatus)) {
+                whereClause.status = { in: SELLER_VISIBLE_STATUSES };
             } else {
                 whereClause.status = statusParam as OrderStatus;
             }
-        } else {
-            whereClause.status = { in: CONFIRMED_SALES_STATUSES };
+        } else if (userRole === 'SELLER') {
+            whereClause.status = { in: SELLER_VISIBLE_STATUSES };
         }
 
         if (searchParam.length > 0) {
@@ -372,6 +373,8 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
                 id: true,
                 status: true,
                 total_amount: true,
+                payment_method: true,
+                coupon_id: true,
                 seller_id: true,
                 seller: {
                     select: { user_id: true }
@@ -383,9 +386,13 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
                     select: {
                         product_id: true,
                         quantity: true,
+                        unit_price: true,
+                        applied_commission_rate: true,
                         product: {
                             select: {
+                                name: true,
                                 is_combo: true,
+                                commission_rate: true,
                                 combo_parts: {
                                     select: {
                                         product_id: true,
@@ -436,60 +443,189 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
         }
 
         const wasPaidOrShipped = order.status === 'PAID' || order.status === 'SHIPPED';
+        const hadReservedTransferStock = order.status === 'PENDING' && order.payment_method === 'TRANSFERENCIA';
+        const shouldRestoreStockOnCancel = wasPaidOrShipped || hadReservedTransferStock;
+
         let canceledCommissionsCount = 0;
+        let createdCommissionAmount = 0;
+        const touchedProductIds: string[] = [];
 
-        const updatedCount = await prismaGlobal.$transaction(async (tx) => {
-            const updateResult = await tx.order.updateMany({
-                where: {
-                    id: orderId,
-                    status: order.status
-                },
-                data: {
-                    status: nextStatus
+        let updatedCount = 0;
+        try {
+            updatedCount = await prismaGlobal.$transaction(async (tx) => {
+                const updateResult = await tx.order.updateMany({
+                    where: {
+                        id: orderId,
+                        status: order.status
+                    },
+                    data: {
+                        status: nextStatus
+                    }
+                });
+
+                if (updateResult.count === 0) {
+                    return 0;
                 }
-            });
 
-            if (updateResult.count === 0) {
-                return 0;
-            }
-
-            if (nextStatus === 'CANCELED' && wasPaidOrShipped) {
-                for (const item of order.items) {
-                    if (!item.product_id || !item.product) continue;
-
-                    if (item.product.is_combo && item.product.combo_parts.length > 0) {
-                        for (const part of item.product.combo_parts) {
-                            await tx.product.update({
-                                where: { id: part.product_id },
-                                data: {
-                                    physical_stock: { increment: part.quantity * item.quantity },
-                                    version: { increment: 1 }
-                                }
-                            });
-                        }
-                    } else {
-                        await tx.product.update({
-                            where: { id: item.product_id },
-                            data: {
-                                physical_stock: { increment: item.quantity },
-                                version: { increment: 1 }
-                            }
+                if (order.status === 'PENDING' && nextStatus === 'PAID') {
+                    if (order.coupon_id && order.payment_method !== 'TRANSFERENCIA') {
+                        await tx.coupon.update({
+                            where: { id: order.coupon_id },
+                            data: { used_count: { increment: 1 } }
                         });
+                    }
+
+                    if (order.payment_method !== 'TRANSFERENCIA') {
+                        for (const item of order.items) {
+                            if (!item.product_id || !item.product) continue;
+
+                            if (item.product.is_combo && item.product.combo_parts.length > 0) {
+                                for (const part of item.product.combo_parts) {
+                                    const requiredQty = part.quantity * item.quantity;
+                                    const decResult = await tx.product.updateMany({
+                                        where: {
+                                            id: part.product_id,
+                                            physical_stock: { gte: requiredQty }
+                                        },
+                                        data: {
+                                            physical_stock: { decrement: requiredQty },
+                                            version: { increment: 1 }
+                                        }
+                                    });
+
+                                    if (decResult.count === 0) {
+                                        throw new Error(`STOCK_SHORTAGE:${item.product.name}`);
+                                    }
+                                    touchedProductIds.push(part.product_id);
+                                }
+                            } else {
+                                const decResult = await tx.product.updateMany({
+                                    where: {
+                                        id: item.product_id,
+                                        physical_stock: { gte: item.quantity }
+                                    },
+                                    data: {
+                                        physical_stock: { decrement: item.quantity },
+                                        version: { increment: 1 }
+                                    }
+                                });
+
+                                if (decResult.count === 0) {
+                                    throw new Error(`STOCK_SHORTAGE:${item.product.name}`);
+                                }
+                                touchedProductIds.push(item.product_id);
+                            }
+                        }
+                    }
+
+                    if (order.seller_id) {
+                        const existingCommission = await tx.commissionLedger.findFirst({
+                            where: { order_id: orderId }
+                        });
+
+                        if (!existingCommission) {
+                            const isSelfPurchase =
+                                order.seller?.user_id &&
+                                order.customer?.user_id &&
+                                order.seller.user_id === order.customer.user_id;
+
+                            if (!isSelfPurchase) {
+                                let totalCommissionAmount = 0;
+                                for (const item of order.items) {
+                                    if (!item.product) continue;
+                                    const rate =
+                                        Number(item.applied_commission_rate) > 0
+                                            ? Number(item.applied_commission_rate)
+                                            : Number(item.product.commission_rate || 0);
+                                    totalCommissionAmount += Number(item.unit_price) * item.quantity * (rate / 100);
+                                }
+
+                                if (totalCommissionAmount > 0) {
+                                    const sanitizedCommission = Math.round(totalCommissionAmount * 100) / 100;
+                                    const clearingDate = new Date();
+                                    clearingDate.setDate(clearingDate.getDate() + 15);
+
+                                    await tx.commissionLedger.create({
+                                        data: {
+                                            order_id: orderId,
+                                            seller_id: order.seller_id,
+                                            amount: sanitizedCommission,
+                                            status: CommissionStatus.PENDING_CLEARANCE,
+                                            clearing_date: clearingDate
+                                        }
+                                    });
+
+                                    createdCommissionAmount = sanitizedCommission;
+                                }
+                            }
+                        }
                     }
                 }
 
-                const canceledCommissions = await tx.commissionLedger.updateMany({
-                    where: {
-                        order_id: orderId,
-                        status: { in: [CommissionStatus.PENDING_CLEARANCE, CommissionStatus.AVAILABLE] }
-                    },
-                    data: { status: CommissionStatus.CANCELED }
-                });
-                canceledCommissionsCount = canceledCommissions.count;
-            }
+                if (nextStatus === 'CANCELED') {
+                    const couponWasConsumed = hadReservedTransferStock || wasPaidOrShipped;
+                    if (order.coupon_id && couponWasConsumed) {
+                        await tx.coupon.updateMany({
+                            where: {
+                                id: order.coupon_id,
+                                used_count: { gt: 0 }
+                            },
+                            data: {
+                                used_count: { decrement: 1 }
+                            }
+                        });
+                    }
 
-            return updateResult.count;
-        });
+                    if (shouldRestoreStockOnCancel) {
+                        for (const item of order.items) {
+                            if (!item.product_id || !item.product) continue;
+
+                            if (item.product.is_combo && item.product.combo_parts.length > 0) {
+                                for (const part of item.product.combo_parts) {
+                                    await tx.product.update({
+                                        where: { id: part.product_id },
+                                        data: {
+                                            physical_stock: { increment: part.quantity * item.quantity },
+                                            version: { increment: 1 }
+                                        }
+                                    });
+                                }
+                            } else {
+                                await tx.product.update({
+                                    where: { id: item.product_id },
+                                    data: {
+                                        physical_stock: { increment: item.quantity },
+                                        version: { increment: 1 }
+                                    }
+                                });
+                            }
+                        }
+                    }
+
+                    if (wasPaidOrShipped) {
+                        const canceledCommissions = await tx.commissionLedger.updateMany({
+                            where: {
+                                order_id: orderId,
+                                status: { in: [CommissionStatus.PENDING_CLEARANCE, CommissionStatus.AVAILABLE] }
+                            },
+                            data: { status: CommissionStatus.CANCELED }
+                        });
+                        canceledCommissionsCount = canceledCommissions.count;
+                    }
+                }
+
+                return updateResult.count;
+            });
+        } catch (txError: any) {
+            if (typeof txError?.message === 'string' && txError.message.startsWith('STOCK_SHORTAGE:')) {
+                const productName = txError.message.replace('STOCK_SHORTAGE:', '');
+                res.status(409).json({
+                    error: `Stock insuficiente para "${productName}". No se puede aprobar la orden.`
+                });
+                return;
+            }
+            throw txError;
+        }
 
         if (updatedCount === 0) {
             res.status(409).json({
@@ -498,7 +634,47 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
             return;
         }
 
+        if (touchedProductIds.length > 0) {
+            await NotificationsService.checkAndNotifyLowStock(touchedProductIds);
+        }
+
         const shortOrderId = order.id.slice(0, 8).toUpperCase();
+
+        if (order.status === 'PENDING' && nextStatus === 'PAID') {
+            if (order.seller_id && createdCommissionAmount > 0 && order.seller?.user_id) {
+                await NotificationsService.notify({
+                    userId: order.seller.user_id,
+                    role: Role.SELLER,
+                    type: NotificationType.COMMISSION_EARNED,
+                    title: `Nueva comisión atribuida: +$${createdCommissionAmount.toFixed(2)}`,
+                    message: `Pedido #${shortOrderId} confirmado. La comisión entra en período de garantía.`,
+                    actionUrl: '/commissions',
+                    metadata: {
+                        order_id: order.id,
+                        amount: createdCommissionAmount,
+                        gateway: order.payment_method
+                    },
+                    dedupKey: `commission_earned:${order.id}`
+                });
+            }
+
+            if (order.customer?.user_id) {
+                await NotificationsService.notify({
+                    userId: order.customer.user_id,
+                    role: Role.CUSTOMER,
+                    type: NotificationType.ORDER_PAID,
+                    title: '¡Pago aprobado!',
+                    message: `Confirmamos el pago de tu pedido #${shortOrderId} por $${Number(order.total_amount).toFixed(2)}. Ya estamos preparando tu compra.`,
+                    actionUrl: `/orders/${order.id}`,
+                    metadata: {
+                        order_id: order.id,
+                        amount: Number(order.total_amount),
+                        gateway: order.payment_method
+                    },
+                    dedupKey: `order_paid:${order.id}`
+                });
+            }
+        }
 
         if (nextStatus === 'CANCELED' && canceledCommissionsCount > 0 && order.seller?.user_id) {
             await NotificationsService.notify({

@@ -1,10 +1,11 @@
 import { Request, Response } from 'express';
 import { prismaGlobal } from '../config/prisma';
 import { RedisService } from '../redis/redis.service';
+import { PricingEngine } from '../products/pricing.engine';
 
 export const syncCart = async (req: Request, res: Response): Promise<Response | void> => {
     try {
-        const { items } = req.body;
+        const { items, paymentMethod, installments = 1 } = req.body;
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: 'El carrito está vacío o tiene un formato inválido.' });
         }
@@ -20,6 +21,8 @@ export const syncCart = async (req: Request, res: Response): Promise<Response | 
                 physical_stock: true,
                 is_combo: true,
                 is_active: true,
+                category_id: true,
+                category: { select: { id: true, path: true } },
                 images: {
                     orderBy: [
                         { is_primary: 'desc' },
@@ -31,16 +34,21 @@ export const syncCart = async (req: Request, res: Response): Promise<Response | 
             }
         });
 
+        const activeRules = await RedisService.getActivePaymentRules();
+        const pricedProducts = PricingEngine.applyDynamicPricing(dbProducts, activeRules);
+
         const comboIds = dbProducts.filter(p => p.is_combo).map(p => p.id);
         const comboStocks = comboIds.length > 0
             ? await RedisService.getMultipleComboStocks(comboIds)
             : {};
 
         let subtotal = 0;
+        let baseSubtotal = 0;
         let hasErrors = false;
+        const effectiveInstallments = Number(installments) || 1;
 
         const hydratedItems = items.map(reqItem => {
-            const dbProduct = dbProducts.find(p => p.id === reqItem.productId);
+            const dbProduct = pricedProducts.find(p => p.id === reqItem.productId);
 
             if (!dbProduct) {
                 hasErrors = true;
@@ -62,6 +70,15 @@ export const syncCart = async (req: Request, res: Response): Promise<Response | 
                 };
             }
 
+            const basePrice = Number(dbProduct.base_price);
+            const effectivePricing = PricingEngine.calculateEffectiveUnitPrice(
+                dbProduct,
+                activeRules,
+                paymentMethod,
+                effectiveInstallments
+            );
+            const unitPrice = effectivePricing.unitPrice;
+
             if (effectiveStock < reqItem.quantity) {
                 hasErrors = true;
                 return {
@@ -69,29 +86,36 @@ export const syncCart = async (req: Request, res: Response): Promise<Response | 
                     error: effectiveStock === 0 ? 'Sin stock disponible.' : 'Stock insuficiente.',
                     availableStock: effectiveStock,
                     name: dbProduct.name,
-                    unitPrice: Number(dbProduct.base_price),
+                    basePrice,
+                    unitPrice,
+                    dynamicPricing: dbProduct.dynamic_pricing,
                     imageUrl: primaryImageUrl
                 };
             }
 
-            const price = Number(dbProduct.base_price);
-            const itemTotal = price * reqItem.quantity;
+            const itemTotal = Math.round(unitPrice * reqItem.quantity * 100) / 100;
+            baseSubtotal += basePrice * reqItem.quantity;
             subtotal += itemTotal;
 
             return {
                 productId: dbProduct.id,
                 name: dbProduct.name,
-                unitPrice: price,
+                basePrice,
+                unitPrice,
+                discountPercentage: effectivePricing.discountPercentage,
+                interestPercentage: effectivePricing.interestPercentage,
                 quantity: reqItem.quantity,
                 itemTotal,
                 availableStock: effectiveStock,
+                dynamicPricing: dbProduct.dynamic_pricing,
                 imageUrl: primaryImageUrl
             };
         });
 
         return res.status(200).json({
             success: !hasErrors,
-            subtotal,
+            baseSubtotal: Math.round(baseSubtotal * 100) / 100,
+            subtotal: Math.round(subtotal * 100) / 100,
             items: hydratedItems
         });
 

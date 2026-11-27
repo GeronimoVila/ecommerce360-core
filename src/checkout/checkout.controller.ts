@@ -16,14 +16,58 @@ const mpClient = new MercadoPagoConfig({
 
 export const createCheckoutIntent = async (req: Request, res: Response): Promise<Response | void> => {
     try {
-        const { items, paymentMethod, customerId, couponCode } = req.body;
+        const {
+            items,
+            paymentMethod,
+            installments = 1,
+            customerId,
+            couponCode,
+            contact,
+            shipping,
+        } = req.body;
 
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: 'El carrito no puede estar vacío.' });
         }
 
+        if (!['MP', 'MOBBEX', 'TRANSFERENCIA'].includes(paymentMethod)) {
+            return res.status(400).json({ error: 'Método de pago no válido.' });
+        }
+
+        if (contact) {
+            const firstName = String(contact.firstName || '').trim();
+            const lastName = String(contact.lastName || '').trim();
+            const email = String(contact.email || '').trim();
+            const phone = String(contact.phone || '').trim();
+
+            if (!firstName || !lastName || !email || !phone) {
+                return res.status(400).json({
+                    error: 'Completa todos los datos de contacto obligatorios (nombre, apellido, email y teléfono).',
+                });
+            }
+        }
+
+        const deliveryType = shipping?.deliveryType === 'PICKUP' ? 'PICKUP' : 'SHIPPING';
+        if (shipping && deliveryType === 'SHIPPING') {
+            const street = String(shipping.street || '').trim();
+            const streetNumber = String(shipping.streetNumber || '').trim();
+            const city = String(shipping.city || '').trim();
+            const province = String(shipping.province || '').trim();
+            const postalCode = String(shipping.postalCode || '').trim();
+
+            if (!street || !streetNumber || !city || !province || !postalCode) {
+                return res.status(400).json({
+                    error: 'Completa la dirección completa de envío (calle, número, ciudad, provincia y código postal).',
+                });
+            }
+        }
+
         let resolvedCustomerProfileId: string | null = null;
         let resolvedCustomerUserId: string | null = null;
+        let resolvedCustomerEmail: string | undefined = contact?.email
+            ? String(contact.email).trim()
+            : undefined;
+
         let rawToken = req.cookies?.access_token;
         if (!rawToken && req.headers.authorization?.startsWith('Bearer ')) {
             rawToken = req.headers.authorization.split(' ')[1];
@@ -35,11 +79,36 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 if (decoded?.sub) {
                     const customerProfile = await prismaGlobal.customerProfile.findUnique({
                         where: { user_id: decoded.sub },
-                        select: { id: true, user_id: true }
+                        select: {
+                            id: true,
+                            user_id: true,
+                            first_name: true,
+                            last_name: true,
+                            phone: true,
+                            user: { select: { email: true } },
+                        },
                     });
                     if (customerProfile) {
                         resolvedCustomerProfileId = customerProfile.id;
                         resolvedCustomerUserId = customerProfile.user_id;
+                        if (!resolvedCustomerEmail && customerProfile.user?.email) {
+                            resolvedCustomerEmail = customerProfile.user.email;
+                        }
+
+                        if (contact) {
+                            const nextFirst = String(contact.firstName || '').trim();
+                            const nextLast = String(contact.lastName || '').trim();
+                            const nextPhone = String(contact.phone || '').trim();
+
+                            await prismaGlobal.customerProfile.update({
+                                where: { id: customerProfile.id },
+                                data: {
+                                    first_name: nextFirst || customerProfile.first_name,
+                                    last_name: nextLast || customerProfile.last_name,
+                                    phone: nextPhone || customerProfile.phone,
+                                },
+                            });
+                        }
                     }
                 }
             } catch {
@@ -55,31 +124,6 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             });
             resolvedCustomerProfileId = fallbackProfile?.id || null;
             resolvedCustomerUserId = fallbackProfile?.user_id || null;
-        }
-
-        const sellerIdCookie = req.cookies.seller_attribution || null;
-        let validSellerId: string | null = null;
-
-        if (sellerIdCookie) {
-            const activeSeller = await prismaGlobal.sellerProfile.findFirst({
-                where: {
-                    OR: [
-                        { id: sellerIdCookie },
-                        { user_id: sellerIdCookie }
-                    ],
-                    user: {
-                        is_active: true,
-                        role: 'SELLER'
-                    }
-                },
-                select: { id: true }
-            });
-
-            if (activeSeller) {
-                validSellerId = activeSeller.id;
-            } else {
-                console.warn(`[Atribución Rechazada] ID de vendedor en cookie (${sellerIdCookie}) inválido o inactivo.`);
-            }
         }
 
         const productIds = items.map((i: { productId: string }) => i.productId);
@@ -99,9 +143,6 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 }
             }
         });
-
-        const activeRules = await RedisService.getActivePaymentRules();
-        PricingEngine.applyDynamicPricing(dbProducts, activeRules);
 
         if (dbProducts.length !== items.length) {
             return res.status(400).json({ error: 'Uno o más productos del carrito no existen o están inactivos.' });
@@ -124,10 +165,20 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             }
         }
 
+        const activeRules = await RedisService.getActivePaymentRules();
+        const effectiveInstallments = Number(installments) || 1;
+
         let subtotalAmount = 0;
         const orderItemsToCreate = items.map((frontendItem: any) => {
             const dbProduct = dbProducts.find(p => p.id === frontendItem.productId)!;
-            const unitPrice = Number(dbProduct.base_price);
+            const pureBasePrice = Number(dbProduct.base_price);
+            const pricing = PricingEngine.calculateEffectiveUnitPrice(
+                dbProduct,
+                activeRules,
+                paymentMethod,
+                effectiveInstallments
+            );
+            const unitPrice = pricing.unitPrice;
             const quantity = Number(frontendItem.quantity);
 
             subtotalAmount += (unitPrice * quantity);
@@ -136,13 +187,16 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 product_id: dbProduct.id,
                 quantity,
                 unit_price: unitPrice,
-                pure_base_price: unitPrice,
+                pure_base_price: pureBasePrice,
                 applied_commission_rate: Number(dbProduct.commission_rate || 0)
             };
         });
 
+        subtotalAmount = Math.round(subtotalAmount * 100) / 100;
+
         let appliedCouponId: string | null = null;
         let appliedCouponCode: string | null = null;
+        let appliedCouponMaxUses: number | null = null;
         let discountAmount = 0;
 
         if (typeof couponCode === 'string' && couponCode.trim() !== '') {
@@ -185,30 +239,154 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             discountAmount = Math.min(Math.round(discountAmount * 100) / 100, subtotalAmount);
             appliedCouponId = coupon.id;
             appliedCouponCode = coupon.code;
+            appliedCouponMaxUses = coupon.max_uses;
         }
 
         const totalAmount = Math.max(0, Math.round((subtotalAmount - discountAmount) * 100) / 100);
 
-        const draftOrder = await prismaGlobal.$transaction(async (tx) => {
-            return await tx.order.create({
-                data: {
-                    customer_id: resolvedCustomerProfileId,
-                    seller_id: validSellerId,
-                    status: 'PENDING',
-                    total_amount: totalAmount,
-                    coupon_id: appliedCouponId,
-                    coupon_code: appliedCouponCode,
-                    discount_amount: discountAmount,
-                    payment_method: paymentMethod,
-                    items: {
-                        create: orderItemsToCreate
+        const normalizedPostalCode =
+            deliveryType === 'SHIPPING' && shipping?.postalCode
+                ? String(shipping.postalCode).trim()
+                : null;
+
+        const structuredShippingData =
+            contact || shipping
+                ? {
+                      deliveryType,
+                      installments: effectiveInstallments,
+                      contact: contact
+                          ? {
+                                firstName: String(contact.firstName || '').trim(),
+                                lastName: String(contact.lastName || '').trim(),
+                                email: String(contact.email || '').trim(),
+                                phone: String(contact.phone || '').trim(),
+                                dni: contact.dni ? String(contact.dni).trim() : null,
+                            }
+                          : null,
+                      address:
+                          deliveryType === 'SHIPPING' && shipping
+                              ? {
+                                    street: String(shipping.street || '').trim(),
+                                    streetNumber: String(shipping.streetNumber || '').trim(),
+                                    floorApartment: shipping.floorApartment
+                                        ? String(shipping.floorApartment).trim()
+                                        : null,
+                                    city: String(shipping.city || '').trim(),
+                                    province: String(shipping.province || '').trim(),
+                                    postalCode: normalizedPostalCode,
+                                    notes: shipping.notes ? String(shipping.notes).trim() : null,
+                                }
+                              : {
+                                    notes: shipping?.notes ? String(shipping.notes).trim() : null,
+                                },
+                  }
+                : undefined;
+
+        const touchedProductIds: string[] = [];
+        let draftOrder;
+
+        try {
+            draftOrder = await prismaGlobal.$transaction(async (tx) => {
+                if (paymentMethod === 'TRANSFERENCIA') {
+                    if (appliedCouponId) {
+                        const couponIncrementResult = await tx.coupon.updateMany({
+                            where: {
+                                id: appliedCouponId,
+                                is_active: true,
+                                ...(appliedCouponMaxUses !== null
+                                    ? { used_count: { lt: appliedCouponMaxUses } }
+                                    : {}),
+                            },
+                            data: {
+                                used_count: { increment: 1 },
+                            },
+                        });
+
+                        if (couponIncrementResult.count === 0) {
+                            throw new Error('COUPON_USAGE_EXCEEDED');
+                        }
                     }
-                },
-                include: {
-                    items: { include: { product: true } }
+
+                    for (const item of orderItemsToCreate) {
+                        const dbProduct = dbProducts.find((p) => p.id === item.product_id)!;
+
+                        if (dbProduct.is_combo && dbProduct.combo_parts.length > 0) {
+                            for (const part of dbProduct.combo_parts) {
+                                const requiredQty = part.quantity * item.quantity;
+                                const decResult = await tx.product.updateMany({
+                                    where: {
+                                        id: part.product_id,
+                                        physical_stock: { gte: requiredQty },
+                                    },
+                                    data: {
+                                        physical_stock: { decrement: requiredQty },
+                                        version: { increment: 1 },
+                                    },
+                                });
+
+                                if (decResult.count === 0) {
+                                    throw new Error(`STOCK_SHORTAGE:${dbProduct.name}`);
+                                }
+                                touchedProductIds.push(part.product_id);
+                            }
+                        } else {
+                            const decResult = await tx.product.updateMany({
+                                where: {
+                                    id: dbProduct.id,
+                                    physical_stock: { gte: item.quantity },
+                                },
+                                data: {
+                                    physical_stock: { decrement: item.quantity },
+                                    version: { increment: 1 },
+                                },
+                            });
+
+                            if (decResult.count === 0) {
+                                throw new Error(`STOCK_SHORTAGE:${dbProduct.name}`);
+                            }
+                            touchedProductIds.push(dbProduct.id);
+                        }
+                    }
                 }
+
+                return await tx.order.create({
+                    data: {
+                        customer_id: resolvedCustomerProfileId,
+                        seller_id: null,
+                        status: 'PENDING',
+                        total_amount: totalAmount,
+                        coupon_id: appliedCouponId,
+                        coupon_code: appliedCouponCode,
+                        discount_amount: discountAmount,
+                        payment_method: paymentMethod,
+                        shipping_cp: normalizedPostalCode,
+                        ...(structuredShippingData ? { shipping_address: structuredShippingData } : {}),
+                        items: {
+                            create: orderItemsToCreate
+                        }
+                    },
+                    include: {
+                        items: { include: { product: true } }
+                    }
+                });
             });
-        });
+        } catch (txError: any) {
+            if (txError?.message === 'COUPON_USAGE_EXCEEDED') {
+                return res.status(400).json({ error: 'El cupón agotó su límite máximo de usos.' });
+            }
+            if (typeof txError?.message === 'string' && txError.message.startsWith('STOCK_SHORTAGE:')) {
+                const productName = txError.message.replace('STOCK_SHORTAGE:', '');
+                return res.status(409).json({
+                    error: 'Quiebre de stock.',
+                    details: `Stock insuficiente para "${productName}" al reservar tu pedido.`
+                });
+            }
+            throw txError;
+        }
+
+        if (touchedProductIds.length > 0) {
+            await NotificationsService.checkAndNotifyLowStock(touchedProductIds);
+        }
 
         let checkoutUrl = '';
         let gatewayTxnId = '';
@@ -218,7 +396,7 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 id: i.product_id || 'N/A',
                 title: i.product?.name || 'Producto',
                 quantity: i.quantity,
-                unit_price: Number(i.pure_base_price) 
+                unit_price: Number(i.unit_price)
             }));
 
             if (discountAmount > 0 && appliedCouponCode) {
@@ -230,7 +408,12 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 });
             }
 
-            const mpResponse = await createMpPreference(draftOrder.id, mpItems);
+            const mpResponse = await createMpPreference(
+                draftOrder.id,
+                mpItems,
+                resolvedCustomerEmail,
+                effectiveInstallments
+            );
             
             checkoutUrl = mpResponse.sandboxInitPoint || mpResponse.initPoint || '';
             gatewayTxnId = mpResponse.preferenceId || '';
@@ -240,7 +423,7 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 data: { gateway_txn_id: gatewayTxnId }
             });
         } else if (paymentMethod === 'MOBBEX') {
-            const mobbexSession = await generateMobbexSessionForOrder(draftOrder.id);
+            const mobbexSession = await generateMobbexSessionForOrder(draftOrder.id, effectiveInstallments);
             checkoutUrl = mobbexSession.checkoutUrl;
             gatewayTxnId = mobbexSession.checkoutId;
         }
@@ -254,10 +437,10 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
                 role: Role.CUSTOMER,
                 type: NotificationType.ORDER_CREATED,
                 title: isTransfer
-                    ? `Pedido #${shortOrderId} recibido (Pendiente de transferencia)`
+                    ? `Pedido #${shortOrderId} recibido (Stock reservado por 7 días)`
                     : `¡Recibimos tu pedido #${shortOrderId}!`,
                 message: isTransfer
-                    ? `Tu orden por $${Number(draftOrder.total_amount).toFixed(2)} fue registrada. Aguardamos la acreditación de tu transferencia para confirmar el pago.`
+                    ? `Tu orden por $${Number(draftOrder.total_amount).toFixed(2)} fue registrada y tu stock quedó reservado por 7 días. Aguardamos la acreditación de tu transferencia.`
                     : `Tu orden por $${Number(draftOrder.total_amount).toFixed(2)} está pendiente de confirmación de pago.`,
                 actionUrl: `/orders/${draftOrder.id}`,
                 metadata: {
@@ -273,8 +456,8 @@ export const createCheckoutIntent = async (req: Request, res: Response): Promise
             success: true,
             message: "Intención de compra registrada exitosamente.",
             attribution: {
-                status: validSellerId ? 'ASSISTED' : 'ORGANIC',
-                sellerId: validSellerId
+                status: 'ORGANIC',
+                sellerId: null
             },
             order: {
                 id: draftOrder.id,
@@ -383,7 +566,7 @@ export const receiveMpWebhook = async (req: Request, res: Response): Promise<Res
                 throw new Error('La orden ya fue procesada previamente.');
             }
 
-            if (order.coupon_id) {
+            if (order.coupon_id && order.payment_method !== 'TRANSFERENCIA') {
                 await tx.coupon.update({
                     where: { id: order.coupon_id },
                     data: { used_count: { increment: 1 } }

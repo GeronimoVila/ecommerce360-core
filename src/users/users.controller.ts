@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
-import { prismaGlobal } from '../config/prisma'; 
+import { prismaGlobal } from '../config/prisma';
 import { RedisService } from '../redis/redis.service';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -12,28 +12,27 @@ export const createSeller = async (req: Request, res: Response): Promise<void> =
   try {
     const rawPassword = crypto.randomBytes(8).toString('hex');
     const password_hash = await bcrypt.hash(rawPassword, 10);
-    
-    const ref_code = `${first_name.toUpperCase().substring(0,4)}${last_name.toUpperCase().substring(0,1)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+
+    const ref_code = `${first_name.toUpperCase().substring(0, 4)}${last_name.toUpperCase().substring(0, 1)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
 
     const newSeller = await req.prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
-        data: { email, password_hash, role: 'SELLER' }
+        data: { email, password_hash, role: 'SELLER' },
       });
 
       const profile = await tx.sellerProfile.create({
-        data: { user_id: user.id, ref_code, first_name, last_name, cbu_alias }
+        data: { user_id: user.id, ref_code, first_name, last_name, cbu_alias },
       });
 
       return { user, profile };
     });
-    
+
     res.status(201).json({
       message: 'Vendedor creado exitosamente',
       seller_id: newSeller.profile.id,
       ref_code: newSeller.profile.ref_code,
-      temporary_password: rawPassword
+      temporary_password: rawPassword,
     });
-
   } catch (error: any) {
     if (error.code === 'P2002') {
       res.status(409).json({ error: 'El email ya está registrado' });
@@ -48,9 +47,9 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
   const { email, first_name, last_name, phone, cbu_alias, is_active } = req.body;
 
   try {
-    const targetUser = await req.prisma.user.findUnique({ 
+    const targetUser = await req.prisma.user.findUnique({
       where: { id: targetId },
-      include: { customer_profile: true, seller_profile: true } 
+      include: { customer_profile: true, seller_profile: true },
     });
 
     if (!targetUser) {
@@ -69,9 +68,9 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
       if (is_active !== undefined) userUpdateData.is_active = is_active;
 
       if (Object.keys(userUpdateData).length > 0) {
-        await tx.user.update({ 
-          where: { id: targetId }, 
-          data: userUpdateData 
+        await tx.user.update({
+          where: { id: targetId },
+          data: userUpdateData,
         });
       }
 
@@ -84,7 +83,7 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
         if (Object.keys(sellerUpdateData).length > 0) {
           await tx.sellerProfile.update({
             where: { id: targetUser.seller_profile.id },
-            data: sellerUpdateData
+            data: sellerUpdateData,
           });
         }
       } else if (targetUser.role === 'CUSTOMER' && targetUser.customer_profile) {
@@ -96,7 +95,7 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
         if (Object.keys(customerUpdateData).length > 0) {
           await tx.customerProfile.update({
             where: { id: targetUser.customer_profile.id },
-            data: customerUpdateData
+            data: customerUpdateData,
           });
         }
       }
@@ -135,7 +134,7 @@ export const deactivateUser = async (req: Request, res: Response): Promise<void>
 
     await req.prisma.user.update({
       where: { id: targetId },
-      data: { is_active: false }
+      data: { is_active: false },
     });
 
     await RedisService.banUserId(targetId, 900);
@@ -155,7 +154,7 @@ export const validateSellerId = async (req: Request, res: Response): Promise<Res
     }
 
     const cachedData = await RedisService.getSellerValidation(id);
-    
+
     if (cachedData) {
       return res.status(200).json(cachedData);
     }
@@ -167,7 +166,7 @@ export const validateSellerId = async (req: Request, res: Response): Promise<Res
       },
       select: {
         id: true,
-      }
+      },
     });
 
     if (!seller) {
@@ -177,13 +176,12 @@ export const validateSellerId = async (req: Request, res: Response): Promise<Res
     const responsePayload = {
       valid: true,
       sellerId: seller.id,
-      expiresIn: 86400 
+      expiresIn: 86400,
     };
 
     await RedisService.setSellerValidation(id, responsePayload, 3600);
 
     return res.status(200).json(responsePayload);
-
   } catch (error) {
     console.error('[UsersController.validateSellerId] Error interno:', error);
     return res.status(500).json({ error: 'Error procesando la validación de atribución.' });
@@ -205,16 +203,64 @@ export const getSellers = async (req: Request, res: Response): Promise<void> => 
             first_name: true,
             last_name: true,
             ref_code: true,
-            cbu_alias: true
-          }
-        }
+            cbu_alias: true,
+          },
+        },
       },
-      orderBy: { created_at: 'desc' }
+      orderBy: { created_at: 'desc' },
     });
 
     res.status(200).json({ data: sellers });
   } catch (error) {
     console.error('[UsersController] Error al obtener sellers:', error);
     res.status(500).json({ error: 'Error al obtener la lista de vendedores.' });
+  }
+};
+
+export const findCustomerByDni = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const rawDni = String(req.params.dni || '');
+    const cleanDni = rawDni.replace(/\D/g, '').trim();
+
+    if (cleanDni.length < 7 || cleanDni.length > 11) {
+      res.status(400).json({ error: 'Formato de DNI inválido (debe contener entre 7 y 11 dígitos).' });
+      return;
+    }
+
+    const customer = await prismaGlobal.customerProfile.findUnique({
+      where: { dni: cleanDni },
+      select: {
+        id: true,
+        dni: true,
+        first_name: true,
+        last_name: true,
+        phone: true,
+        user: {
+          select: {
+            email: true,
+            is_active: true,
+          },
+        },
+      },
+    });
+
+    if (!customer || !customer.user.is_active) {
+      res.status(404).json({ error: 'No se encontró ningún cliente activo registrado con ese DNI.' });
+      return;
+    }
+
+    res.status(200).json({
+      customer: {
+        id: customer.id,
+        dni: customer.dni,
+        first_name: customer.first_name,
+        last_name: customer.last_name,
+        phone: customer.phone,
+        email: customer.user.email,
+      },
+    });
+  } catch (error) {
+    console.error('[UsersController.findCustomerByDni] Error:', error);
+    res.status(500).json({ error: 'Error interno al buscar el cliente por DNI.' });
   }
 };

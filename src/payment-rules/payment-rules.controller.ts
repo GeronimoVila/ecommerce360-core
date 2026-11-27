@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
+import { prismaGlobal } from '../config/prisma';
 import { RedisService } from '../redis/redis.service';
 import { triggerB2CRevalidation } from '../utils/revalidate.util';
 
@@ -64,16 +65,18 @@ export const createPaymentRule = async (req: Request, res: Response): Promise<vo
 
 export const getPaymentRules = async (req: Request, res: Response): Promise<void> => {
   try {
-    const rules = await req.prisma.paymentRule.findMany({
+    const db = req.prisma || prismaGlobal;
+    const rules = await db.paymentRule.findMany({
       orderBy: { created_at: 'desc' },
       include: {
-        category: { select: { name: true } },
+        category: { select: { name: true, path: true } },
         product: { select: { sku: true, name: true } }
       }
     });
 
     res.status(200).json({ data: rules });
   } catch (error) {
+    console.error('[PaymentRules] Error al obtener:', error);
     res.status(500).json({ error: 'Error al obtener las reglas de pago.' });
   }
 };

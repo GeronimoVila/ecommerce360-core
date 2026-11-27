@@ -182,7 +182,7 @@ export const toggleMobbexMode = async (req: Request, res: Response): Promise<voi
   }
 };
 
-export async function generateMobbexSessionForOrder(orderId: string) {
+export async function generateMobbexSessionForOrder(orderId: string, installments?: number) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: {
@@ -217,6 +217,8 @@ export async function generateMobbexSessionForOrder(orderId: string) {
   const auth = await resolveMobbexCredentials(DEFAULT_TENANT);
   const reference = auth.isDemoFallback ? `E360_DEV_${order.id}_${Date.now()}` : order.id;
   const orderTotal = Number(order.total_amount);
+  const normalizedInstallments = Number(installments);
+  const hasCustomInstallments = Number.isFinite(normalizedInstallments) && normalizedInstallments > 1;
 
   const mobbexItems = order.items.map((item) => {
     const productImageUrl = item.product?.images?.[0]?.url;
@@ -239,6 +241,27 @@ export async function generateMobbexSessionForOrder(orderId: string) {
 
   const baseWebhookUrl = (process.env.WEBHOOK_URL || '').trim().replace(/\/$/, '');
 
+  const checkoutPayload: Record<string, any> = {
+    total: orderTotal,
+    currency: 'ARS',
+    reference,
+    description: `Orden #${order.id.slice(0, 8).toUpperCase()} - Ecommerce 360`,
+    test: auth.isTest,
+    timeout: 15,
+    return_url: `${baseWebhookUrl}/api/mobbex/checkout-bridge?orderId=${order.id}`,
+    webhook: `${baseWebhookUrl}/api/mobbex/webhook?options=final&internalOrderId=${order.id}`,
+    customer: {
+      email: customerEmail,
+      name: customerFullName,
+      identification: '11111111',
+    },
+    items: mobbexItems,
+  };
+
+  if (hasCustomInstallments) {
+    checkoutPayload.installments = [normalizedInstallments];
+  }
+
   const response = await fetch('https://api.mobbex.com/p/checkout', {
     method: 'POST',
     headers: {
@@ -248,22 +271,7 @@ export async function generateMobbexSessionForOrder(orderId: string) {
       'x-api-key': auth.apiKey,
       'x-access-token': auth.accessToken,
     },
-    body: JSON.stringify({
-      total: orderTotal,
-      currency: 'ARS',
-      reference,
-      description: `Orden #${order.id.slice(0, 8).toUpperCase()} - Ecommerce 360`,
-      test: auth.isTest,
-      timeout: 15,
-      return_url: `${baseWebhookUrl}/api/mobbex/checkout-bridge?orderId=${order.id}`,
-      webhook: `${baseWebhookUrl}/api/mobbex/webhook?options=final&internalOrderId=${order.id}`,
-      customer: {
-        email: customerEmail,
-        name: customerFullName,
-        identification: '11111111',
-      },
-      items: mobbexItems,
-    }),
+    body: JSON.stringify(checkoutPayload),
   });
 
   const rawBody = await response.text();
@@ -281,8 +289,9 @@ export async function generateMobbexSessionForOrder(orderId: string) {
         where: { id: order.id },
         data: { gateway_txn_id: mockId, payment_method: 'MOBBEX' },
       });
+      const installmentsParam = hasCustomInstallments ? `&installments=${normalizedInstallments}` : '';
       return {
-        checkoutUrl: `${baseWebhookUrl}/api/mobbex/mock-gateway?orderId=${order.id}&total=${orderTotal}`,
+        checkoutUrl: `${baseWebhookUrl}/api/mobbex/mock-gateway?orderId=${order.id}&total=${orderTotal}${installmentsParam}`,
         checkoutId: mockId,
         orderId: order.id,
         amountCharged: orderTotal,
@@ -330,7 +339,7 @@ export async function generateMobbexSessionForOrder(orderId: string) {
 
 export const createMobbexCheckout = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { orderId } = req.body;
+    const { orderId, installments } = req.body;
     const authenticatedUserId = (req as any).user?.id;
 
     if (!orderId) {
@@ -357,7 +366,7 @@ export const createMobbexCheckout = async (req: Request, res: Response): Promise
       return;
     }
 
-    const session = await generateMobbexSessionForOrder(String(orderId));
+    const session = await generateMobbexSessionForOrder(String(orderId), installments);
     res.json(session);
   } catch (error: any) {
     if (error.message === 'ORDEN_YA_PAGADA') {

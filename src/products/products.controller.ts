@@ -23,6 +23,11 @@ const PRODUCT_IMAGES_SELECT = {
   is_primary: true
 };
 
+export interface TechnicalSpecItem {
+  key: string;
+  value: string;
+}
+
 interface ComboPartStockInfo {
   product_id?: string;
   quantity: number;
@@ -31,6 +36,28 @@ interface ComboPartStockInfo {
     physical_stock: number;
     is_active?: boolean;
   };
+}
+
+function sanitizeDescription(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const trimmed = String(raw).trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function sanitizeTechnicalSpecs(raw: unknown): TechnicalSpecItem[] {
+  if (!Array.isArray(raw)) return [];
+  const cleaned: TechnicalSpecItem[] = [];
+
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const key = String((item as any).key ?? '').trim();
+    const value = String((item as any).value ?? '').trim();
+    if (key && value) {
+      cleaned.push({ key, value });
+    }
+  }
+
+  return cleaned;
 }
 
 function computeVirtualStockFromParts(parts?: ComboPartStockInfo[]): number {
@@ -219,6 +246,8 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
     const {
       sku,
       name,
+      description,
+      technical_specs,
       purchase_cost,
       vat_rate,
       profit_margin,
@@ -251,11 +280,15 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
 
     const costWithVat = cost * (1 + vat);
     const calculatedBasePrice = costWithVat * (1 + margin);
+    const cleanSpecs = sanitizeTechnicalSpecs(technical_specs);
 
     const newProduct = await req.prisma.product.create({
       data: {
         sku: normalizedSku,
         name: normalizedName,
+        description: sanitizeDescription(description),
+        technical_specs:
+          cleanSpecs.length > 0 ? (cleanSpecs as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
         purchase_cost: new Prisma.Decimal(cost),
         vat_rate: new Prisma.Decimal(vat_rate),
         profit_margin: new Prisma.Decimal(profit_margin),
@@ -292,6 +325,8 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
     const {
       sku,
       name,
+      description,
+      technical_specs,
       purchase_cost,
       vat_rate,
       profit_margin,
@@ -324,6 +359,12 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
 
     if (normalizedSku !== undefined) dataToUpdate.sku = normalizedSku;
     if (normalizedName !== undefined) dataToUpdate.name = normalizedName;
+    if (description !== undefined) dataToUpdate.description = sanitizeDescription(description);
+    if (technical_specs !== undefined) {
+      const cleanSpecs = sanitizeTechnicalSpecs(technical_specs);
+      dataToUpdate.technical_specs =
+        cleanSpecs.length > 0 ? (cleanSpecs as unknown as Prisma.InputJsonValue) : Prisma.JsonNull;
+    }
     if (is_active !== undefined) dataToUpdate.is_active = Boolean(is_active);
 
     if (category_id !== undefined) {
@@ -363,6 +404,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
     });
 
     triggerB2CRevalidation('products');
+    triggerB2CRevalidation(`product-${id}`);
 
     res.status(200).json({
       message: 'Producto actualizado exitosamente',
@@ -385,6 +427,7 @@ export const deactivateProduct = async (req: Request, res: Response): Promise<vo
     });
 
     triggerB2CRevalidation('products');
+    triggerB2CRevalidation(`product-${id}`);
 
     res.status(200).json({
       message: 'Producto dado de baja lógicamente. Ya no será visible en el Storefront.',
@@ -425,6 +468,7 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
         id: true,
         sku: true,
         name: true,
+        description: true,
         base_price: true,
         physical_stock: true,
         is_combo: true,
@@ -567,6 +611,7 @@ export const reactivateProduct = async (req: Request, res: Response): Promise<vo
     });
 
     triggerB2CRevalidation('products');
+    triggerB2CRevalidation(`product-${id}`);
 
     res.status(200).json({
       message: 'Producto reactivado exitosamente. Vuelve a ser visible en el Storefront.',
@@ -586,6 +631,8 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
     const {
       sku,
       name,
+      description,
+      technical_specs,
       base_price,
       commission_rate,
       category_id,
@@ -662,12 +709,16 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
     }
 
     const calculatedInitialStock = minVirtualStock === Infinity ? 0 : minVirtualStock;
+    const cleanSpecs = sanitizeTechnicalSpecs(technical_specs);
 
     const newCombo = await req.prisma.$transaction(async (tx) => {
       return await tx.product.create({
         data: {
           sku: normalizedSku,
           name: normalizedName,
+          description: sanitizeDescription(description),
+          technical_specs:
+            cleanSpecs.length > 0 ? (cleanSpecs as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
           base_price: new Prisma.Decimal(base_price),
           purchase_cost: new Prisma.Decimal(0),
           vat_rate: new Prisma.Decimal(0),
@@ -707,6 +758,8 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
         id: newCombo.id,
         sku: newCombo.sku,
         name: newCombo.name,
+        description: newCombo.description,
+        technical_specs: newCombo.technical_specs,
         base_price: newCombo.base_price,
         category_id: newCombo.category_id,
         category: newCombo.category,
@@ -730,7 +783,16 @@ export const createCombo = async (req: Request, res: Response): Promise<void> =>
 export const updateCombo = async (req: Request, res: Response): Promise<void> => {
   try {
     const comboId = req.params.id as string;
-    const { sku, name, base_price, commission_rate, category_id, parts } = req.body;
+    const {
+      sku,
+      name,
+      description,
+      technical_specs,
+      base_price,
+      commission_rate,
+      category_id,
+      parts
+    } = req.body;
 
     if (!parts || !Array.isArray(parts) || parts.length === 0) {
       res.status(400).json({ error: 'Un combo debe contener al menos un componente.' });
@@ -807,6 +869,7 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
     }
 
     const calculatedVirtualStock = minVirtualStock === Infinity ? 0 : minVirtualStock;
+    const cleanSpecs = technical_specs !== undefined ? sanitizeTechnicalSpecs(technical_specs) : undefined;
 
     const updatedCombo = await req.prisma.$transaction(async (tx) => {
       await tx.comboItem.deleteMany({
@@ -818,6 +881,11 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
         data: {
           ...(normalizedSku !== undefined && { sku: normalizedSku }),
           ...(normalizedName !== undefined && { name: normalizedName }),
+          ...(description !== undefined && { description: sanitizeDescription(description) }),
+          ...(cleanSpecs !== undefined && {
+            technical_specs:
+              cleanSpecs.length > 0 ? (cleanSpecs as unknown as Prisma.InputJsonValue) : Prisma.JsonNull
+          }),
           ...(base_price !== undefined && { base_price: new Prisma.Decimal(base_price) }),
           ...(commission_rate !== undefined && { commission_rate: new Prisma.Decimal(commission_rate) }),
           ...(category_id !== undefined && { category_id }),
@@ -847,6 +915,7 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
 
     await RedisService.registerComboDependencies(comboId, partIdsToRegister);
     triggerB2CRevalidation('products');
+    triggerB2CRevalidation(`product-${comboId}`);
 
     res.status(200).json({
       message: 'Combo actualizado exitosamente.',
@@ -854,6 +923,8 @@ export const updateCombo = async (req: Request, res: Response): Promise<void> =>
         id: updatedCombo.id,
         sku: updatedCombo.sku,
         name: updatedCombo.name,
+        description: updatedCombo.description,
+        technical_specs: updatedCombo.technical_specs,
         base_price: updatedCombo.base_price,
         category_id: updatedCombo.category_id,
         category: updatedCombo.category,
@@ -897,6 +968,7 @@ export const getAdminCatalog = async (req: Request, res: Response): Promise<void
         id: true,
         sku: true,
         name: true,
+        description: true,
         base_price: true,
         physical_stock: true,
         is_combo: true,
@@ -969,6 +1041,19 @@ export const getStorefrontCatalog = async (req: Request, res: Response): Promise
     const skip = (page - 1) * limit;
 
     const whereClause: Prisma.ProductWhereInput = { is_active: true };
+
+    const searchQuery = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    if (searchQuery) {
+      whereClause.OR = [
+        { name: { contains: searchQuery, mode: 'insensitive' } },
+        { sku: { contains: searchQuery, mode: 'insensitive' } },
+        { description: { contains: searchQuery, mode: 'insensitive' } },
+      ];
+    }
+
+    if (req.query.is_combo === 'true') {
+      whereClause.is_combo = true;
+    }
 
     const categoryFilter = await buildCategoryWhereFilter(
       prismaGlobal,
@@ -1069,6 +1154,8 @@ export const getStorefrontProductById = async (req: Request, res: Response): Pro
         id: true,
         sku: true,
         name: true,
+        description: true,
+        technical_specs: true,
         base_price: true,
         physical_stock: true,
         is_combo: true,

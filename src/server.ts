@@ -11,6 +11,7 @@ import checkoutRoutes from './checkout/checkout.routes';
 import budgetRoutes from './checkout/budget.routes';
 import suppliersRoutes from './suppliers/suppliers.routes';
 import { startMaturationCron } from './commissions/maturation.cron';
+import { startTransferExpirationCron } from './orders/transferExpiration.cron';
 import commissionsRoutes from './commissions/commissions.routes';
 import ordersRoutes from './orders/orders.routes';
 import dashboardRoutes from './dashboard/dashboard.routes';
@@ -21,6 +22,7 @@ import { startMediaCleanupCron } from './media/media.cron';
 import { initMediaCleanupJob } from './jobs/mediaCleanup.job';
 import notificationsRoutes from './notifications/notifications.routes';
 import couponsRoutes from './coupons/coupons.routes';
+import storefrontRoutes from './storefront/storefront.routes';
 
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -77,6 +79,7 @@ app.use('/api/v1/categories', categoriesRoutes);
 app.use('/api/v1/media', mediaRoutes);
 app.use('/api/v1/notifications', notificationsRoutes);
 app.use('/api/v1/coupons', couponsRoutes);
+app.use('/api/v1/storefront', storefrontRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: "Core Engine Operativo", version: "1.0.1" });
@@ -100,6 +103,7 @@ async function bootstrap() {
         app.listen(port, () => {
             console.log(`🚀 API Gateway escuchando en el puerto ${port}`);
             startMaturationCron();
+            startTransferExpirationCron();
             startMediaCleanupCron();
             initMediaCleanupJob();
         });

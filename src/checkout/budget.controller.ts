@@ -40,7 +40,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
       return res.status(401).json({ error: 'Token inválido o malformado: No se encontró el claim sub.' });
     }
 
-    const { items, customerId, paymentMethod } = req.body;
+    const { items, customerId, paymentMethod, installments = 1 } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'El presupuesto debe contener al menos un producto.' });
@@ -98,9 +98,6 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
       },
     });
 
-    const activeRules = await RedisService.getActivePaymentRules();
-    PricingEngine.applyDynamicPricing(dbProducts, activeRules);
-
     if (dbProducts.length !== items.length) {
       return res.status(400).json({ error: 'Discrepancia en catálogo: Productos inactivos o inexistentes.' });
     }
@@ -118,10 +115,21 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
       }
     }
 
+    const activePaymentMethod = paymentMethod || 'MP';
+    const effectiveInstallments = Number(installments) || 1;
+    const activeRules = await RedisService.getActivePaymentRules();
+
     let totalAmount = 0;
     const orderItemsToCreate = items.map((frontendItem: any) => {
       const dbProduct = dbProducts.find((p) => p.id === frontendItem.productId)!;
-      const unitPrice = Number(dbProduct.base_price);
+      const pureBasePrice = Number(dbProduct.base_price);
+      const pricing = PricingEngine.calculateEffectiveUnitPrice(
+        dbProduct,
+        activeRules,
+        activePaymentMethod,
+        effectiveInstallments
+      );
+      const unitPrice = pricing.unitPrice;
       const quantity = Number(frontendItem.quantity);
 
       totalAmount += unitPrice * quantity;
@@ -130,10 +138,12 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
         product_id: dbProduct.id,
         quantity,
         unit_price: unitPrice,
-        pure_base_price: unitPrice,
+        pure_base_price: pureBasePrice,
         applied_commission_rate: Number(dbProduct.commission_rate || 0),
       };
     });
+
+    totalAmount = Math.round(totalAmount * 100) / 100;
 
     const budgetOrder = await req.prisma.order.create({
       data: {
@@ -141,7 +151,7 @@ export const createBudget = async (req: Request, res: Response): Promise<Respons
         customer_id: validCustomerId,
         status: 'BUDGET',
         total_amount: totalAmount,
-        payment_method: paymentMethod || 'MP',
+        payment_method: activePaymentMethod,
         items: { create: orderItemsToCreate },
       },
     });
@@ -203,6 +213,7 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
 
     const id = req.params.id as string;
     const requestedMethod = req.body?.paymentMethod as 'MP' | 'MOBBEX' | 'TRANSFERENCIA' | undefined;
+    const requestedInstallments = Number(req.body?.installments) || 1;
 
     const order = await prismaGlobal.order.findUnique({
       where: { id },
@@ -212,6 +223,7 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
           include: {
             product: {
               include: {
+                category: { select: { id: true, path: true } },
                 combo_parts: {
                   include: {
                     product: {
@@ -249,38 +261,166 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
       return res.status(410).json({ error: 'El presupuesto ha expirado (48h). Solicite uno nuevo.' });
     }
 
-    for (const item of order.items) {
-      if (!item.product) continue;
-      const availableStock = getAvailableStockForProduct(item.product);
+    const stockAlreadyReserved = order.status === 'PENDING' && order.payment_method === 'TRANSFERENCIA';
 
-      if (availableStock < item.quantity) {
-        return res.status(409).json({
-          error: 'Quiebre de stock.',
-          details: `Stock insuficiente para "${item.product.name}" (disponible: ${availableStock}, requerido: ${item.quantity}).`,
-        });
+    if (!stockAlreadyReserved) {
+      for (const item of order.items) {
+        if (!item.product) continue;
+        const availableStock = getAvailableStockForProduct(item.product);
+
+        if (availableStock < item.quantity) {
+          return res.status(409).json({
+            error: 'Quiebre de stock.',
+            details: `Stock insuficiente para "${item.product.name}" (disponible: ${availableStock}, requerido: ${item.quantity}).`,
+          });
+        }
       }
     }
 
     const activePaymentMethod = requestedMethod || order.payment_method;
-    let checkoutUrl = '';
-    let gatewayTxnId = '';
+    const activeRules = await RedisService.getActivePaymentRules();
 
-    if (!order.customer_id) {
-      await prismaGlobal.order.update({
-        where: { id: order.id },
-        data: { customer_id: customerProfile.id },
+    let recalculatedTotal = 0;
+    const updatedItemPrices = order.items.map((item) => {
+      if (!item.product) {
+        const fallbackUnit = Number(item.unit_price);
+        recalculatedTotal += fallbackUnit * item.quantity;
+        return { id: item.id, unit_price: fallbackUnit };
+      }
+      const pricing = PricingEngine.calculateEffectiveUnitPrice(
+        item.product,
+        activeRules,
+        activePaymentMethod,
+        requestedInstallments
+      );
+      recalculatedTotal += pricing.unitPrice * item.quantity;
+      return { id: item.id, unit_price: pricing.unitPrice };
+    });
+
+    recalculatedTotal = Math.round(recalculatedTotal * 100) / 100;
+    const touchedProductIds: string[] = [];
+
+    try {
+      await prismaGlobal.$transaction(async (tx) => {
+        for (const itemUpdate of updatedItemPrices) {
+          await tx.orderItem.update({
+            where: { id: itemUpdate.id },
+            data: { unit_price: itemUpdate.unit_price },
+          });
+        }
+
+        if (activePaymentMethod === 'TRANSFERENCIA' && !stockAlreadyReserved) {
+          for (const item of order.items) {
+            if (!item.product_id || !item.product) continue;
+
+            if (item.product.is_combo && item.product.combo_parts.length > 0) {
+              for (const part of item.product.combo_parts) {
+                const requiredQty = part.quantity * item.quantity;
+                const decResult = await tx.product.updateMany({
+                  where: {
+                    id: part.product_id,
+                    physical_stock: { gte: requiredQty },
+                  },
+                  data: {
+                    physical_stock: { decrement: requiredQty },
+                    version: { increment: 1 },
+                  },
+                });
+
+                if (decResult.count === 0) {
+                  throw new Error(`STOCK_SHORTAGE:${item.product.name}`);
+                }
+                touchedProductIds.push(part.product_id);
+              }
+            } else {
+              const decResult = await tx.product.updateMany({
+                where: {
+                  id: item.product_id,
+                  physical_stock: { gte: item.quantity },
+                },
+                data: {
+                  physical_stock: { decrement: item.quantity },
+                  version: { increment: 1 },
+                },
+              });
+
+              if (decResult.count === 0) {
+                throw new Error(`STOCK_SHORTAGE:${item.product.name}`);
+              }
+              touchedProductIds.push(item.product_id);
+            }
+          }
+        }
+
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            customer_id: customerProfile.id,
+            payment_method: activePaymentMethod,
+            total_amount: recalculatedTotal,
+            ...(activePaymentMethod === 'TRANSFERENCIA' ? { status: 'PENDING' } : {}),
+          },
+        });
+      });
+    } catch (txError: any) {
+      if (typeof txError?.message === 'string' && txError.message.startsWith('STOCK_SHORTAGE:')) {
+        const productName = txError.message.replace('STOCK_SHORTAGE:', '');
+        return res.status(409).json({
+          error: 'Quiebre de stock.',
+          details: `Stock insuficiente para "${productName}" al reservar el presupuesto.`,
+        });
+      }
+      throw txError;
+    }
+
+    if (touchedProductIds.length > 0) {
+      await NotificationsService.checkAndNotifyLowStock(touchedProductIds);
+    }
+
+    if (activePaymentMethod === 'TRANSFERENCIA') {
+      const shortOrderId = order.id.slice(0, 8).toUpperCase();
+      await NotificationsService.notify({
+        userId: customerProfile.user_id,
+        role: Role.CUSTOMER,
+        type: NotificationType.ORDER_CREATED,
+        title: `Pedido #${shortOrderId} confirmado por transferencia (Stock reservado por 7 días)`,
+        message: `Tu orden por $${recalculatedTotal.toFixed(2)} fue registrada y el stock quedó reservado por 7 días.`,
+        actionUrl: `/orders/${order.id}`,
+        metadata: {
+          order_id: order.id,
+          total_amount: recalculatedTotal,
+          payment_method: 'TRANSFERENCIA',
+        },
+        dedupKey: `order_created:${order.id}`,
+      });
+
+      return res.status(200).json({
+        success: true,
+        gateway: 'TRANSFERENCIA',
+        orderId: order.id,
       });
     }
 
-    if (activePaymentMethod === 'MP') {
-      const mpItems = order.items.map((i: any) => ({
-        id: i.product_id || 'N/A',
-        title: i.product?.name || 'Producto Presupuestado',
-        quantity: i.quantity,
-        unit_price: Number(i.unit_price),
-      }));
+    let checkoutUrl = '';
+    let gatewayTxnId = '';
 
-      const mpResponse = await createMpPreference(order.id, mpItems);
+    if (activePaymentMethod === 'MP') {
+      const mpItems = order.items.map((i: any) => {
+        const updatedItem = updatedItemPrices.find((u) => u.id === i.id);
+        return {
+          id: i.product_id || 'N/A',
+          title: i.product?.name || 'Producto Presupuestado',
+          quantity: i.quantity,
+          unit_price: updatedItem ? updatedItem.unit_price : Number(i.unit_price),
+        };
+      });
+
+      const mpResponse = await createMpPreference(
+        order.id,
+        mpItems,
+        undefined,
+        requestedInstallments
+      );
       checkoutUrl = mpResponse.sandboxInitPoint || mpResponse.initPoint || '';
       gatewayTxnId = mpResponse.preferenceId || '';
 
@@ -288,13 +428,11 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
         where: { id: order.id },
         data: {
           status: 'PENDING',
-          customer_id: customerProfile.id,
-          payment_method: 'MP',
           gateway_txn_id: gatewayTxnId,
         },
       });
     } else if (activePaymentMethod === 'MOBBEX') {
-      const mobbexSession = await generateMobbexSessionForOrder(order.id);
+      const mobbexSession = await generateMobbexSessionForOrder(order.id, requestedInstallments);
       checkoutUrl = mobbexSession.checkoutUrl;
       gatewayTxnId = mobbexSession.checkoutId;
 
@@ -302,7 +440,6 @@ export const payBudget = async (req: Request<{ id: string }>, res: Response): Pr
         where: { id: order.id },
         data: {
           status: 'PENDING',
-          customer_id: customerProfile.id,
           gateway_txn_id: gatewayTxnId,
         },
       });
@@ -589,7 +726,7 @@ export const mercadopagoWebhookHandler = async (req: Request, res: Response): Pr
               order_id: approvedOrder.id,
               amount: Number(approvedOrder.total_amount),
               gateway: 'MP',
-              payment_id: txId,
+              payment_id: String(paymentId),
             },
             dedupKey: `order_paid:${approvedOrder.id}`,
           });

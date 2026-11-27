@@ -14,7 +14,12 @@ export interface MpItem {
     unit_price: number;
 }
 
-export const createMpPreference = async (orderId: string, items: MpItem[], customerEmail?: string) => {
+export const createMpPreference = async (
+    orderId: string,
+    items: MpItem[],
+    customerEmail?: string,
+    installments?: number
+) => {
     try {
         const preference = new Preference(mpClient);
 
@@ -51,6 +56,14 @@ export const createMpPreference = async (orderId: string, items: MpItem[], custo
             },
             external_reference: String(orderId)
         };
+
+        const normalizedInstallments = Number(installments);
+        if (Number.isFinite(normalizedInstallments) && normalizedInstallments > 1) {
+            body.payment_methods = {
+                installments: normalizedInstallments,
+                default_installments: normalizedInstallments,
+            };
+        }
 
         if (returnEntrypoint.startsWith('https://')) {
             body.auto_return = 'approved';

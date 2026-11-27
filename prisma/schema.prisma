@@ -60,6 +60,12 @@ enum NotificationType {
   ASSISTED_BUDGET_READY
 }
 
+enum BannerLinkType {
+  PRODUCT
+  CATEGORY
+  OFFERS
+}
+
 model User {
   id            String  @id @default(uuid()) @db.Uuid
   role          Role    @default(CUSTOMER)
@@ -81,6 +87,7 @@ model User {
 model CustomerProfile {
   id         String  @id @default(uuid()) @db.Uuid
   user_id    String  @unique @db.Uuid
+  dni        String? @unique @db.VarChar(20)
   first_name String?
   last_name  String?
   phone      String?
@@ -115,6 +122,8 @@ model Product {
   id                 String                 @id @default(uuid()) @db.Uuid
   sku                String                 @unique
   name               String                 @unique
+  description         String?                @db.Text
+  technical_specs     Json?
   purchase_cost      Decimal                @default(0) @db.Decimal(10, 2)
   vat_rate           Decimal                @default(21) @db.Decimal(5, 2)
   profit_margin      Decimal                @default(0) @db.Decimal(5, 2)
@@ -135,6 +144,8 @@ model Product {
   images             ProductImage[]
   low_stock_threshold Int                   @default(5)
   low_stock_alerted   Boolean               @default(false)
+  is_featured         Boolean               @default(false)
+  featured_order      Int                   @default(0)
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
@@ -415,4 +426,27 @@ model Notification {
   @@index([user_id, read_at, created_at(sort: Desc)])
   @@index([user_id, created_at(sort: Desc)])
   @@map("notifications")
+}
+
+model StorefrontBanner {
+  id               String         @id @default(uuid()) @db.Uuid
+  badge_text       String?        @db.VarChar(80)
+  title            String         @db.VarChar(140)
+  highlight_text   String?        @db.VarChar(80)
+  subtitle         String?        @db.Text
+  cta_text         String         @default("Ver Promociones") @db.VarChar(60)
+  payment_note     String?        @default("Visa, Mastercard & MP") @db.VarChar(80)
+  image_url        String
+  storage_key      String         @unique
+  image_badge_text String?        @db.VarChar(60)
+  link_type        BannerLinkType @default(OFFERS)
+  link_target      String?        @db.VarChar(150)
+  position         Int            @default(0)
+  is_active        Boolean        @default(true)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([is_active, position])
+  @@map("storefront_banners")
 }
